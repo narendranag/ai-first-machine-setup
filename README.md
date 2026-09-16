@@ -5,6 +5,28 @@
 
 # An opinionated version of what an AI-first Mac and dev workflow looks like
 
+## Quick start
+
+You need a Mac, a GitHub account and a Claude plan that includes Claude Code (Pro or Max). Everything else can be added as you go — the [full checklist](#get-started) lists the accounts worth opening first.
+
+1. **Install the operator** — four commands in Terminal.app:
+
+   ```bash
+   xcode-select --install
+   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+   brew install gh && gh auth login
+   brew install --cask claude-code
+   ```
+
+2. **Create your private copy** of this template and open Claude Code in it:
+
+   ```bash
+   cd ~ && gh repo create system-manager --template narendranag/ai-first-machine-setup --private --clone
+   cd ~/system-manager && claude
+   ```
+
+3. **Hand over** — log in to Claude Code, check the status line shows auto mode, and paste the prompt from [`docs/FIRST-PROMPT.md`](docs/FIRST-PROMPT.md). From there you log in, grant permissions and decide; Claude does the rest.
+
 **A template for getting Claude to run a fleet of machines you own, be your developer, your personal assistant and more.**
 
 I've spent the last year increasing how often, where, and how I use Claude. Today, I spend 90% of my time in Claude Code and in the terminal. I have a private LLM (Qwen) running on a Mac Studio, a laptop as a daily driver, and a Pi as my media center — all set up, managed and run by Claude. I decided to codify my approach to infrastructure (GitHub + Cloudflare), work (terminal-first, CLI script over app/prompt, AI-native but not MCP-first), organization (folder structure matters), dev patterns (git-based, dev stack, free), productivity tools (MacParakeet, Obsidian), and more (photography, writing, etc.) and make it available to anyone. There are many hard-earned lessons here: I went down the path of naming Claude (Jeeves, in my case), getting it to hire sub-agents and similar YouTube-friendly productivity hacks almost a year ago. This is where I've landed — it's fast, it works, and it's Claude-first (sorry ChatGPT). And now, it's yours to do with as you please.
@@ -18,7 +40,7 @@ This repo is two things at once: the note that explains the approach, and the sk
 > [!NOTE]
 > Everything here is opinionated on purpose. It is one working setup, written down so a machine can follow it. Where I chose, the reason is in [`docs/TEMPLATE-DECISIONS.md`](docs/TEMPLATE-DECISIONS.md); change what doesn't fit and record why in your own `docs/DECISIONS.md`.
 
-**Contents** · [The idea](#the-idea) · [The map](#the-map) · [The build](#the-build) · [The brain](#the-brain) · [Trust](#trust) · [Tools](#tools) · [The second brain](#the-second-brain) · [Workflows](#workflows) · [What I'd tell my past self](#what-id-tell-my-past-self) · [Get started](#get-started)
+**Contents** · [Quick start](#quick-start) · [The idea](#the-idea) · [The map](#the-map) · [The build](#the-build) · [The brain](#the-brain) · [Trust](#trust) · [Tools](#tools) · [The second brain](#the-second-brain) · [Workflows](#workflows) · [What I'd tell my past self](#what-id-tell-my-past-self) · [Get started](#get-started)
 
 ---
 
