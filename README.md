@@ -31,10 +31,6 @@ You need a Mac, a GitHub account and a Claude plan that includes Claude Code (Pr
 
 I've spent the last year increasing how often, where, and how I use Claude. Today, I spend 90% of my time in Claude Code and in the terminal. I have a private LLM (Qwen) running on a Mac Studio, a laptop as a daily driver, and a Pi as my media center — all set up, managed and run by Claude. I decided to codify my approach to infrastructure (GitHub + Cloudflare), work (terminal-first, CLI script over app/prompt, AI-native but not MCP-first), organization (folder structure matters), dev patterns (git-based, dev stack, free), productivity tools (MacParakeet, Obsidian), and more (photography, writing, etc.) and make it available to anyone. There are many hard-earned lessons here: I went down the path of naming Claude (Jeeves, in my case), getting it to hire sub-agents and similar YouTube-friendly productivity hacks almost a year ago. This is where I've landed — it's fast, it works, and it's Claude-first (sorry ChatGPT). And now, it's yours to do with as you please.
 
-**Step One: Install the operator**
-
-You type four commands. Claude Code sets up the machine, keeps a map of it, manages the rest of your fleet over SSH, and runs the workflows around your projects, notes, archives and documents. Your jobs are the three things only a human can do: **authenticate, set the permission mode, and decide.**
-
 This repo is two things at once: the note that explains the approach, and the skeleton you clone to adopt it.
 
 > [!NOTE]
