@@ -3,9 +3,15 @@
   <img alt="Install the operator first. Four commands in Terminal, then Claude Code sets up the rest: the machine map, SSH key, tailnet, Bitwarden, hooks, Brewfiles, brains and the daily loop." src="docs/diagrams/hero.svg" width="100%">
 </picture>
 
-# Install the operator first
+# An opinionated version of what an AI-first Mac and dev workflow looks like
 
-**A template for running your Macs with Claude Code as the IT help desk.** You type four commands. Claude Code sets up the machine, keeps a map of it, manages the rest of your fleet over SSH, and runs the workflows around your projects, notes, archives and documents. Your jobs are the three things only a human can do: **authenticate, set the permission mode, and decide.**
+**A template for getting Claude to run a fleet of machines you own, be your developer, your personal assistant and more.**
+
+I've spent the last year increasing how often, where, and how I use Claude. Today, I spend 90% of my time in Claude Code and in the terminal. I have a private LLM (Qwen) running on a Mac Studio, a laptop as a daily driver, and a Pi as my media center — all set up, managed and run by Claude. I decided to codify my approach to infrastructure (GitHub + Cloudflare), work (terminal-first, CLI script over app/prompt, AI-native but not MCP-first), organization (folder structure matters), dev patterns (git-based, dev stack, free), productivity tools (MacParakeet, Obsidian), and more (photography, writing, etc.) and make it available to anyone. There are many hard-earned lessons here: I went down the path of naming Claude (Jeeves, in my case), getting it to hire sub-agents and similar YouTube-friendly productivity hacks almost a year ago. This is where I've landed — it's fast, it works, and it's Claude-first (sorry ChatGPT). And now, it's yours to do with as you please.
+
+**Step One: Install the operator**
+
+You type four commands. Claude Code sets up the machine, keeps a map of it, manages the rest of your fleet over SSH, and runs the workflows around your projects, notes, archives and documents. Your jobs are the three things only a human can do: **authenticate, set the permission mode, and decide.**
 
 This repo is two things at once: the note that explains the approach, and the skeleton you clone to adopt it.
 
@@ -24,11 +30,11 @@ From that point, anything I would once have taken to an IT help desk goes to Cla
 
 The human keeps three jobs:
 
-| Job | What it means in practice |
-|---|---|
-| **Authenticate** | Every login, every password typed, every OAuth consent screen, every "allow" on a macOS permission prompt. Claude never handles a credential. |
-| **Set the mode** | Claude Code runs in *auto mode*: a separate classifier model reviews each action instead of you, and your ask and deny rules still hold. Never *bypass permissions*. |
-| **Decide** | Claude proposes; you choose. Anything destructive, anything touching credentials, anything that costs money — it asks first, every time. |
+| Job              | What it means in practice                                                                                                                                            |
+| ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Authenticate** | Every login, every password typed, every OAuth consent screen, every "allow" on a macOS permission prompt. Claude never handles a credential.                        |
+| **Set the mode** | Claude Code runs in _auto mode_: a separate classifier model reviews each action instead of you, and your ask and deny rules still hold. Never _bypass permissions_. |
+| **Decide**       | Claude proposes; you choose. Anything destructive, anything touching credentials, anything that costs money — it asks first, every time.                             |
 
 **Why "manage my machine" is a better first prompt than "help me code."** A coding assistant sees one repo. An operator sees the system the repos live in: which machine this is, what's installed, where secrets come from, how things sync, what runs on a schedule. Give it that context once, written down in files it maintains, and every later session — including every coding session — starts from a true picture instead of a guess. The machine setup is the context-engineering problem, solved once.
 
@@ -55,17 +61,17 @@ The home directory gets a handful of top-level folders that sit beside the macOS
 
 **Top-level folders are containers, not repos** (except `system-manager` and `vault`). Repos live one level down. Nothing is ever nested.
 
-**The brain-per-folder rule.** Any folder that needs automation gets its own `CLAUDE.md` — a *brain* — and a `TASKS.md`. You start Claude in the folder where the work is; that brain says what to do *here*, and points to `~/system-manager/docs/` for what the system looks like. `archive/` has a brain whose two jobs are archive and retrieve. `library/camera` has one that ingests cards and finds photos by metadata. `resources/` has one that OCRs scans and tracks passport expiry dates. Folders that just hold files have no brain.
+**The brain-per-folder rule.** Any folder that needs automation gets its own `CLAUDE.md` — a _brain_ — and a `TASKS.md`. You start Claude in the folder where the work is; that brain says what to do _here_, and points to `~/system-manager/docs/` for what the system looks like. `archive/` has a brain whose two jobs are archive and retrieve. `library/camera` has one that ingests cards and finds photos by metadata. `resources/` has one that OCRs scans and tracks passport expiry dates. Folders that just hold files have no brain.
 
 **Everything has exactly one way off the machine:**
 
-| What | Mechanism | Why |
-|---|---|---|
-| Brains, code, the vault | git → GitHub | versioned, mergeable, works everywhere |
-| Archive, camera cold copy, books | `rclone` → Cloudflare R2, one-way | cheap object storage with no egress fees; the archive index is rebuilt from the bucket, so there's nothing to sync |
-| Family documents | `rclone bisync` over an `rclone crypt` remote | two-way, and passport scans never sit in plain object storage |
-| A working folder between my own machines | Syncthing | peer-to-peer, no cloud |
-| A file for someone else | Google Drive, or an R2 presigned link | sharing is a separate job from syncing |
+| What                                     | Mechanism                                     | Why                                                                                                                |
+| ---------------------------------------- | --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| Brains, code, the vault                  | git → GitHub                                  | versioned, mergeable, works everywhere                                                                             |
+| Archive, camera cold copy, books         | `rclone` → Cloudflare R2, one-way             | cheap object storage with no egress fees; the archive index is rebuilt from the bucket, so there's nothing to sync |
+| Family documents                         | `rclone bisync` over an `rclone crypt` remote | two-way, and passport scans never sit in plain object storage                                                      |
+| A working folder between my own machines | Syncthing                                     | peer-to-peer, no cloud                                                                                             |
+| A file for someone else                  | Google Drive, or an R2 presigned link         | sharing is a separate job from syncing                                                                             |
 
 **Why no Dropbox.** Every job it would do is covered above, and a second sync engine brings its own conflict rules, its own selective-sync state and its own idea of what "deleted" means. Same for iCloud Drive on working folders. The one real gap is arbitrary files on a phone; I accept that the phone gets the vault, not the filesystem.
 
@@ -147,16 +153,16 @@ At the end, commit and push docs/ and tell me what is left.
 
 `~/system-manager` is a private repo created from this template, cloned on every machine that runs Claude Code. Four files carry the weight:
 
-| File | Holds | Rule |
-|---|---|---|
-| `CLAUDE.md` | operating instructions | identify the host → read its machine file → read `FLEET.md`; pull before acting, push after changing `docs/` |
-| `docs/machines/<host>.md` | this machine's state | written only by that machine |
-| `docs/FLEET.md` | every machine, role, Tailscale name, Brewfile layers | changes rarely |
-| `docs/DECISIONS.md` | every decision, `[host] [date]` tagged | append-only, so it always merges |
+| File                      | Holds                                                | Rule                                                                                                         |
+| ------------------------- | ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `CLAUDE.md`               | operating instructions                               | identify the host → read its machine file → read `FLEET.md`; pull before acting, push after changing `docs/` |
+| `docs/machines/<host>.md` | this machine's state                                 | written only by that machine                                                                                 |
+| `docs/FLEET.md`           | every machine, role, Tailscale name, Brewfile layers | changes rarely                                                                                               |
+| `docs/DECISIONS.md`       | every decision, `[host] [date]` tagged               | append-only, so it always merges                                                                             |
 
-**What goes in the map.** Identity and role; Tailscale name; what's installed beyond the Brewfile layers; VS Code extensions; launchd jobs; listening ports; services; where keys live (never the keys); sensitive locations; the security baseline. Sections marked *(checked)* are parsed by `bin/map-check`, which diffs them against reality — `brew leaves`, `code --list-extensions`, the LaunchAgents directories, `lsof` — and then runs `bin/security-check`. **Drift is a bug**: fix the machine or fix the map, in the same session.
+**What goes in the map.** Identity and role; Tailscale name; what's installed beyond the Brewfile layers; VS Code extensions; launchd jobs; listening ports; services; where keys live (never the keys); sensitive locations; the security baseline. Sections marked _(checked)_ are parsed by `bin/map-check`, which diffs them against reality — `brew leaves`, `code --list-extensions`, the LaunchAgents directories, `lsof` — and then runs `bin/security-check`. **Drift is a bug**: fix the machine or fix the map, in the same session.
 
-**Per-machine files in one shared repo.** I started with "no shared map" — each machine keeps its own. It fell apart the first time one machine needed to manage another. Now the repo is shared and the *files* are per machine: a laptop writes only `machines/laptop.md` plus the file of any headless box it changed. Conflicts are rare by construction, and when two managers touch the same box in overlapping sessions, the rebase surfaces it and Claude merges markdown well.
+**Per-machine files in one shared repo.** I started with "no shared map" — each machine keeps its own. It fell apart the first time one machine needed to manage another. Now the repo is shared and the _files_ are per machine: a laptop writes only `machines/laptop.md` plus the file of any headless box it changed. Conflicts are rare by construction, and when two managers touch the same box in overlapping sessions, the rebase surfaces it and Claude merges markdown well.
 
 **Hooks do the syncing, not discipline.** The `SessionStart` hook pulls with `--rebase --autostash`, reports whether Bitwarden is unlocked, and refreshes task copies in the vault. The `Stop` hook commits any `docs/` change as `[host] update …` and pushes, at the end of every turn — because sessions get killed far more often than they get exited.
 
@@ -166,7 +172,7 @@ At the end, commit and push docs/ and tell me what is left.
 
 Auto mode is only sane with guard rails. These are mine.
 
-**Auto mode, never bypass.** A classifier model reviews every action before it runs and blocks anything that goes beyond what you asked for, reaches infrastructure it doesn't recognise, or looks steered by content Claude just read. Rules sit on top, and they are absolute: in [`claude-global/settings.json`](claude-global/settings.json), `git push`, `rm`, `rclone`, `sudo` and the storage scripts are on the *ask* list, which prompts even in auto mode; force-push, raw `bw get` and reading browser profiles are on the *deny* list, which blocks in every mode. Anything the classifier refuses three times in a row drops the session back to asking you.
+**Auto mode, never bypass.** A classifier model reviews every action before it runs and blocks anything that goes beyond what you asked for, reaches infrastructure it doesn't recognize, or looks steered by content Claude just read. Rules sit on top, and they are absolute: in [`claude-global/settings.json`](claude-global/settings.json), `git push`, `rm`, `rclone`, `sudo` and the storage scripts are on the _ask_ list, which prompts even in auto mode; force-push, raw `bw get` and reading browser profiles are on the _deny_ list, which blocks in every mode. Anything the classifier refuses three times in a row drops the session back to asking you.
 
 **One SSH key per machine.** Generated on the machine, registered on GitHub under the machine's name, never copied. Losing a laptop means revoking one key.
 
@@ -188,18 +194,18 @@ Auto mode is only sane with guard rails. These are mine.
 
 **Headless browsing is Playwright, not Chrome.** `browse` drives Playwright's bundled Chromium: markdown by default, `--screenshot`, `--pdf`, and `--profile` for sites you've logged into yourself with `browse --login`. Google Chrome stays the human's browser. The same engine runs end-to-end tests in every web app the scaffold creates. It even rendered the screenshots I used to check the diagrams in this README.
 
-**The terminal: Ghostty.** This whole approach is *configuration as files that Claude maintains*, and iTerm2 was the one tool in my stack whose configuration lived in a GUI. Ghostty's is a plain text file ([`dotfiles/ghostty.config`](dotfiles/ghostty.config)) the brain can own, and it's fast and native besides. If you depend on tmux control mode, triggers or session restore, stay on iTerm2 — those have no equivalent yet.
+**The terminal: Ghostty.** This whole approach is _configuration as files that Claude maintains_, and iTerm2 was the one tool in my stack whose configuration lived in a GUI. Ghostty's is a plain text file ([`dotfiles/ghostty.config`](dotfiles/ghostty.config)) the brain can own, and it's fast and native besides. If you depend on tmux control mode, triggers or session restore, stay on iTerm2 — those have no equivalent yet.
 
 **LibreOffice as a build tool.** Nobody hand-edits a generated document. Projects produce `.docx`, `.xlsx` and `.pptx` from code and use `soffice --headless` to convert and check them.
 
 **Two languages, four targets.** Python and TypeScript, nothing else unless a platform forces it. [`docs/DEV-GUIDELINES.md`](docs/DEV-GUIDELINES.md) fixes the rest: `uv` and `pnpm`, `ruff` and `biome`, `pytest`, `vitest` and Playwright, SQLite everywhere (a plain file, Cloudflare D1, or Turso, whose free plan covers 100 databases and 5 GB), `better-auth`, PostHog for analytics, session replay, flags and errors (its free tier includes 1M events, 5K recordings and 100K exceptions a month) with self-hosted Bugsink — one Docker container, Sentry SDKs unmodified — as the private fallback.
 
-| Target | Stack | Ships via |
-|---|---|---|
-| Web | Next.js + Tailwind + shadcn/ui; Hono on Workers for API-only; FastAPI when Python | Cloudflare, `wrangler` |
-| Mobile | Expo + Expo Router + NativeWind | EAS Build + Submit |
-| CLI / TUI | Typer + Rich, Textual | `uv tool install`, PyPI or a brew tap |
-| Desktop | Tauri v2 with a TypeScript front end | signed, notarized `.dmg` from GitHub Actions |
+| Target    | Stack                                                                             | Ships via                                    |
+| --------- | --------------------------------------------------------------------------------- | -------------------------------------------- |
+| Web       | Next.js + Tailwind + shadcn/ui; Hono on Workers for API-only; FastAPI when Python | Cloudflare, `wrangler`                       |
+| Mobile    | Expo + Expo Router + NativeWind                                                   | EAS Build + Submit                           |
+| CLI / TUI | Typer + Rich, Textual                                                             | `uv tool install`, PyPI or a brew tap        |
+| Desktop   | Tauri v2 with a TypeScript front end                                              | signed, notarized `.dmg` from GitHub Actions |
 
 `new-app <type> <name>` scaffolds any of them with a brain, a task list, a `justfile`, the secret scan and a private GitHub repo.
 
@@ -225,11 +231,11 @@ vault/
 
 **The voice pipeline.** [MacParakeet](https://macparakeet.com) transcribes on the machine with NVIDIA's Parakeet model — nothing leaves the Mac. Three routes, by length:
 
-| Capture | Route | Script |
-|---|---|---|
-| A thought, a to-do | dictate into `inbox/quick.md` | none — cheapest wins |
-| A meeting | record in MacParakeet | `transcripts-sync` exports each completed transcript to `inbox/transcripts/` — a launchd agent watches the app's database, so it just appears |
-| A file, a URL, a podcast | `macparakeet-cli transcribe <input> --no-history --output-dir ~/vault/inbox/transcripts --format transcript` | none — `--no-history` keeps it out of the database, so nothing is exported twice |
+| Capture                  | Route                                                                                                        | Script                                                                                                                                        |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| A thought, a to-do       | dictate into `inbox/quick.md`                                                                                | none — cheapest wins                                                                                                                          |
+| A meeting                | record in MacParakeet                                                                                        | `transcripts-sync` exports each completed transcript to `inbox/transcripts/` — a launchd agent watches the app's database, so it just appears |
+| A file, a URL, a podcast | `macparakeet-cli transcribe <input> --no-history --output-dir ~/vault/inbox/transcripts --format transcript` | none — `--no-history` keeps it out of the database, so nothing is exported twice                                                              |
 
 `transcripts-sync` reads the database read-only past a per-machine cursor, and stamps every note with the recording's id, so a lost cursor can't duplicate anything and a transcript you've already processed is never overwritten. `/transcripts` then does the thinking: a five-line summary with decisions and open questions in `notes/`, people linked, **every action item routed to the brain that owns it** under `## Next` with a link back, and the raw transcript filed in `sources/transcripts/`. Action items nobody owns go to `## Unassigned` — which sits at the top of the task map, must be emptied by every weekly review, and pings Telegram once it passes ten.
 
@@ -244,29 +250,29 @@ vault/
 
 **Four forms, one rule: if it can be a script, it's a script.** A slash command is for when a step needs judgment or a conversation, and it orchestrates scripts rather than reimplementing them. A hook is for what must happen every time without asking. A scheduled job is for what must happen without a session, installed as a launchd agent by `bin/schedule`.
 
-| Workflow | Trigger | Form |
-|---|---|---|
-| Session start / end | every session | hooks → `git pull`, `tasks-sync` / commit + push `docs/`, `tg-send` |
-| New machine | rare | `/setup` → Brewfiles, `setup-tools.sh`, `map-check` |
-| New project | often | `/new-app` → `bin/new-app` |
-| Meeting transcripts | on recording | `transcripts-sync` (watches the MacParakeet database) → `/transcripts` |
-| Process inbox | daily | `/inbox` (transcripts first, then `quick.md`, then the rest) |
-| Daily note | 06:30 + on demand | scheduled draft + `/today` |
-| Reading digest | 06:00 | `feeds-sync` |
-| Fleet drift | daily | `map-check` → `tg-send` on drift |
-| Weekly review | weekly | `/review` — empties `## Unassigned` first |
-| Archive / retrieve | ad hoc | `/archive`, `/retrieve` → `archive-push`, `archive-pull` |
-| Camera card | when a card goes in | `camera-ingest` |
-| Family documents | hourly | `resources-sync` |
-| Graduate a project | ad hoc | `/graduate` |
-| Upstream a lesson | occasional | `/upstream` → PR against this template |
-| Rotate a secret | ad hoc | `/rotate` |
+| Workflow            | Trigger             | Form                                                                   |
+| ------------------- | ------------------- | ---------------------------------------------------------------------- |
+| Session start / end | every session       | hooks → `git pull`, `tasks-sync` / commit + push `docs/`, `tg-send`    |
+| New machine         | rare                | `/setup` → Brewfiles, `setup-tools.sh`, `map-check`                    |
+| New project         | often               | `/new-app` → `bin/new-app`                                             |
+| Meeting transcripts | on recording        | `transcripts-sync` (watches the MacParakeet database) → `/transcripts` |
+| Process inbox       | daily               | `/inbox` (transcripts first, then `quick.md`, then the rest)           |
+| Daily note          | 06:30 + on demand   | scheduled draft + `/today`                                             |
+| Reading digest      | 06:00               | `feeds-sync`                                                           |
+| Fleet drift         | daily               | `map-check` → `tg-send` on drift                                       |
+| Weekly review       | weekly              | `/review` — empties `## Unassigned` first                              |
+| Archive / retrieve  | ad hoc              | `/archive`, `/retrieve` → `archive-push`, `archive-pull`               |
+| Camera card         | when a card goes in | `camera-ingest`                                                        |
+| Family documents    | hourly              | `resources-sync`                                                       |
+| Graduate a project  | ad hoc              | `/graduate`                                                            |
+| Upstream a lesson   | occasional          | `/upstream` → PR against this template                                 |
+| Rotate a secret     | ad hoc              | `/rotate`                                                              |
 
 **Build them in this order.** Plumbing first — unlock, notifications, the hooks, `tasks-sync`, `map-check` — because everything else assumes keys, sync and a trustworthy map. Then the daily loop, because you touch it every day. Then the per-trigger jobs, when their trigger first happens. `/setup` gets validated properly only when you build machine two.
 
 ## What I'd tell my past self
 
-**1. Share the map, split the files.** I began with a rule that each machine keeps its own map and nothing is shared. It lasted until the first time the laptop needed to fix the NAS. One shared repo with a file per machine, synced by hooks, gives every manager the whole fleet and almost never conflicts.
+**1. Share the map, split the files.** I began with a rule that each machine keeps its own map and nothing is shared. It lasted until the first time the laptop needed to fix the Mac Studio. One shared repo with a file per machine, synced by hooks, gives every manager the whole fleet and almost never conflicts.
 
 **2. Plaintext secrets in a private repo are still plaintext.** My first version had a `.secrets` repo — private, gitignored everywhere else, and a copy of every key on every clone forever. Moving to Bitwarden cost one unlock per session. That's the whole price.
 
@@ -290,7 +296,7 @@ vault/
 - [ ] Research service keys: Tavily, Firecrawl, Jina, Exa → Bitwarden
 - [ ] PostHog → Bitwarden, spend alert
 - [ ] Telegram: `/newbot` with @BotFather → token and chat id → Bitwarden
-- [ ] *Later:* Google Cloud OAuth client for Gmail, Calendar and Drive ([how](docs/SECRETS.md#getting-each-value))
+- [ ] _Later:_ Google Cloud OAuth client for Gmail, Calendar and Drive ([how](docs/SECRETS.md#getting-each-value))
 
 **2. The four commands** in Terminal.app — see [The build](#the-build).
 
@@ -306,17 +312,17 @@ Paste [`docs/FIRST-PROMPT.md`](docs/FIRST-PROMPT.md). Then do what it asks: log 
 <details>
 <summary><b>What's in the box</b></summary>
 
-| Path | What |
-|---|---|
-| [`CLAUDE.md`](CLAUDE.md) | the fleet brain's operating instructions |
-| [`bin/`](bin) | every script — each answers `--help` and uses exit codes |
-| [`claude-global/`](claude-global) | global `CLAUDE.md`, settings, hooks and slash commands, linked into `~/.claude` |
-| [`Brewfile`](Brewfile) · [`.dev`](Brewfile.dev) · [`.server`](Brewfile.server) | packages by role |
-| [`setup-tools.sh`](setup-tools.sh) | what Homebrew can't install |
-| [`dotfiles/`](dotfiles) · [`macos-defaults.sh`](macos-defaults.sh) | shell, prompt, Ghostty, git; macOS settings |
-| [`templates/`](templates) | app scaffolds (web, mobile, cli, desktop) and brains (vault, archive, camera, resources) |
-| [`docs/`](docs) | first prompt, dev guidelines, secrets, fleet index, decisions, the example machine file |
-| [`docs/diagrams/render.py`](docs/diagrams/render.py) | source for every diagram in this README |
+| Path                                                                           | What                                                                                     |
+| ------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------- |
+| [`CLAUDE.md`](CLAUDE.md)                                                       | the fleet brain's operating instructions                                                 |
+| [`bin/`](bin)                                                                  | every script — each answers `--help` and uses exit codes                                 |
+| [`claude-global/`](claude-global)                                              | global `CLAUDE.md`, settings, hooks and slash commands, linked into `~/.claude`          |
+| [`Brewfile`](Brewfile) · [`.dev`](Brewfile.dev) · [`.server`](Brewfile.server) | packages by role                                                                         |
+| [`setup-tools.sh`](setup-tools.sh)                                             | what Homebrew can't install                                                              |
+| [`dotfiles/`](dotfiles) · [`macos-defaults.sh`](macos-defaults.sh)             | shell, prompt, Ghostty, git; macOS settings                                              |
+| [`templates/`](templates)                                                      | app scaffolds (web, mobile, cli, desktop) and brains (vault, archive, camera, resources) |
+| [`docs/`](docs)                                                                | first prompt, dev guidelines, secrets, fleet index, decisions, the example machine file  |
+| [`docs/diagrams/render.py`](docs/diagrams/render.py)                           | source for every diagram in this README                                                  |
 
 </details>
 
