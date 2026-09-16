@@ -1,0 +1,187 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["playwright==1.63.0", "trafilatura>=2.0"]
+# ///
+"""browse — load a page in headless Chromium (Playwright) and return it as markdown, a screenshot or a PDF.
+
+For pages that need a real browser: JavaScript-rendered content, teaser-only feeds, logged-in sites.
+Static pages are cheaper through `firecrawl` or `jina`.
+
+Usage:
+  browse <url>                          main content as markdown (default, same as --md)
+  browse <url> --md [--full]            --full keeps navigation, sidebars and footers
+  browse <url> --screenshot [PATH]      full-page PNG (default ./<host>-<timestamp>.png); prints the path
+  browse <url> --pdf [PATH]             A4 PDF with backgrounds; prints the path
+  browse <url> --profile NAME           use the persistent profile ~/.config/browse/profiles/NAME
+  browse --login NAME <url>             open a visible window on that profile so you can log in yourself
+
+Options:
+  --wait MS          extra wait after load for late-rendering pages (default 0)
+  --width PX         viewport width (default 1280)
+  --timeout S        navigation timeout (default 45)
+
+Profiles hold logged-in state (cookies, local storage). They live outside every repo, are never
+committed, and are listed as a sensitive location in docs/machines/<host>.md. Only you log in:
+`--login` opens a window and waits for you to close it.
+
+Browser: Playwright's bundled Chromium, not Google Chrome. Installed by setup-tools.sh; if missing:
+  uv tool install playwright==1.63.0 && playwright install chromium
+
+Exit codes: 0 ok · 1 page failed to load / nothing extracted · 2 usage · 3 Chromium not installed
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import re
+import sys
+from pathlib import Path
+from urllib.parse import urlparse
+
+PROFILES = Path.home() / ".config" / "browse" / "profiles"
+
+
+def profile_dir(name: str) -> Path:
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", name):
+        raise SystemExit("browse: profile names are lowercase letters, digits, - and _")
+    d = PROFILES / name
+    d.mkdir(parents=True, exist_ok=True, mode=0o700)
+    return d
+
+
+def to_markdown(html: str, url: str, full: bool) -> str:
+    import trafilatura
+
+    md = None
+    if not full:
+        md = trafilatura.extract(html, url=url, output_format="markdown", include_links=True,
+                                 include_tables=True, include_images=False, favor_recall=True)
+    if not md:  # --full, or extraction found no main content: keep everything readable
+        md = trafilatura.extract(html, url=url, output_format="markdown", include_links=True,
+                                 include_tables=True, no_fallback=False, favor_recall=True,
+                                 include_comments=True) or ""
+    meta = trafilatura.extract_metadata(html, default_url=url)
+    title = (meta.title if meta and meta.title else "").strip()
+    head = f"# {title}\n\nSource: {url}\n\n" if title else f"Source: {url}\n\n"
+    return head + md.strip() + "\n"
+
+
+def default_path(url: str, ext: str) -> Path:
+    host = urlparse(url).hostname or "page"
+    return Path.cwd() / f"{host}-{dt.datetime.now():%Y%m%d-%H%M%S}.{ext}"
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(add_help=False)
+    ap.add_argument("-h", "--help", action="store_true")
+    ap.add_argument("url", nargs="?")
+    mode = ap.add_mutually_exclusive_group()
+    mode.add_argument("--md", action="store_true")
+    mode.add_argument("--screenshot", nargs="?", const="", metavar="PATH")
+    mode.add_argument("--pdf", nargs="?", const="", metavar="PATH")
+    mode.add_argument("--login", metavar="NAME")
+    ap.add_argument("--full", action="store_true")
+    ap.add_argument("--profile", metavar="NAME")
+    ap.add_argument("--wait", type=int, default=0)
+    ap.add_argument("--width", type=int, default=1280)
+    ap.add_argument("--timeout", type=int, default=45)
+    try:
+        a = ap.parse_args()
+    except SystemExit:
+        return 2
+    if a.help:
+        print(__doc__)
+        return 0
+    if not a.url:
+        print(__doc__, file=sys.stderr)
+        return 2
+    url = a.url if "://" in a.url else f"https://{a.url}"
+
+    from playwright.sync_api import Error as PWError
+    from playwright.sync_api import TimeoutError as PWTimeout
+    from playwright.sync_api import sync_playwright
+
+    headless = a.login is None
+    profile = a.login or a.profile
+    with sync_playwright() as pw:
+        try:
+            if profile:
+                ctx = pw.chromium.launch_persistent_context(
+                    str(profile_dir(profile)), headless=headless,
+                    viewport={"width": a.width, "height": 900}, accept_downloads=False)
+                browser = None
+            else:
+                browser = pw.chromium.launch(headless=True)
+                ctx = browser.new_context(viewport={"width": a.width, "height": 900})
+        except PWError as e:
+            if "Executable doesn't exist" in str(e) or "playwright install" in str(e):
+                print("browse: Chromium is not installed. Run: playwright install chromium", file=sys.stderr)
+                return 3
+            raise
+
+        page = ctx.pages[0] if ctx.pages else ctx.new_page()
+        page.set_default_timeout(a.timeout * 1000)
+        try:
+            page.goto(url, wait_until="domcontentloaded")
+            try:
+                page.wait_for_load_state("networkidle", timeout=min(15000, a.timeout * 1000))
+            except PWTimeout:
+                pass  # long-polling pages never go idle; take what rendered
+            if a.wait:
+                page.wait_for_timeout(a.wait)
+        except PWError as e:
+            print(f"browse: could not load {url}: {str(e).splitlines()[0]}", file=sys.stderr)
+            ctx.close()
+            return 1
+
+        if a.login:
+            print(f"browse: log in in the window, then close it. Profile: {profile_dir(profile)}", file=sys.stderr)
+            page.wait_for_event("close", timeout=0)
+            ctx.close()
+            return 0
+
+        if a.screenshot is not None:
+            out = Path(a.screenshot) if a.screenshot else default_path(url, "png")
+            # Size the viewport to the document instead of full_page=True: full-page capture
+            # hangs on some documents (bare SVGs, fixed-height app shells).
+            page.set_viewport_size({"width": a.width, "height": 100})
+            w, h = page.evaluate("""() => {
+                const d = document.documentElement, b = document.body;
+                const r = d.getBoundingClientRect();
+                return [Math.ceil(Math.max(d.scrollWidth, r.width, b ? b.scrollWidth : 0)),
+                        Math.ceil(Math.max(d.scrollHeight, r.height, b ? b.scrollHeight : 0))];
+            }""")
+            page.set_viewport_size({"width": max(a.width, min(w, 8000)), "height": max(1, min(h, 16000))})
+            try:
+                page.screenshot(path=str(out), full_page=False, animations="disabled")
+            except PWError as e:
+                print(f"browse: screenshot failed: {str(e).splitlines()[0]}", file=sys.stderr)
+                ctx.close()
+                return 1
+            print(out)
+        elif a.pdf is not None:
+            out = Path(a.pdf) if a.pdf else default_path(url, "pdf")
+            page.emulate_media(media="print")
+            page.pdf(path=str(out), format="A4", print_background=True)
+            print(out)
+        else:
+            md = to_markdown(page.content(), page.url, a.full)
+            ctx.close()
+            if browser:
+                browser.close()
+            if len(md.strip().splitlines()) <= 2:
+                print(f"browse: no readable content at {url}", file=sys.stderr)
+                return 1
+            sys.stdout.write(md)
+            return 0
+
+        ctx.close()
+        if browser:
+            browser.close()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

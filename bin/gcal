@@ -1,0 +1,78 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["google-api-python-client>=2.150", "google-auth-oauthlib>=1.2"]
+# ///
+"""gcal — Google Calendar from the command line. Markdown out by default.
+
+Usage:
+  gcal list [--days N] [--calendar ID] [--json]     upcoming events (default 7 days, primary)
+  gcal add "title" --start ISO --end ISO [--calendar ID] [--description TEXT]
+                                                    create an event; ISO like 2026-10-01T09:00:00-05:00
+                                                    or a date (2026-10-01) for all-day
+
+Auth: OAuth token shared with gmail/gdrive, kept in Bitwarden (see lib/google_auth.py).
+Exit codes: 0 ok · 1 API error · 2 usage · 3 bw missing · 4 locked · 5 credentials missing
+"""
+
+import argparse
+import datetime as dt
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+import google_auth  # noqa: E402
+import sm  # noqa: E402
+
+
+def when(v: str) -> dict:
+    return {"date": v} if len(v) == 10 else {"dateTime": v}
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(prog="gcal", add_help=False)
+    ap.add_argument("-h", "--help", action="store_true")
+    sub = ap.add_subparsers(dest="cmd")
+    ls = sub.add_parser("list", add_help=False)
+    ls.add_argument("--days", type=int, default=7)
+    ls.add_argument("--calendar", default="primary")
+    ls.add_argument("--json", action="store_true")
+    add = sub.add_parser("add", add_help=False)
+    add.add_argument("title")
+    add.add_argument("--start", required=True)
+    add.add_argument("--end", required=True)
+    add.add_argument("--calendar", default="primary")
+    add.add_argument("--description", default="")
+    try:
+        a = ap.parse_args()
+    except SystemExit:
+        return sm.EX_USAGE
+    if a.help or not a.cmd:
+        print(__doc__)
+        return sm.EX_OK if a.help else sm.EX_USAGE
+
+    cal = google_auth.service("calendar", "v3")
+    if a.cmd == "list":
+        now = dt.datetime.now(dt.timezone.utc)
+        items = cal.events().list(
+            calendarId=a.calendar, timeMin=now.isoformat(), timeMax=(now + dt.timedelta(days=a.days)).isoformat(),
+            singleEvents=True, orderBy="startTime", maxResults=250,
+        ).execute().get("items", [])
+        if a.json:
+            print(json.dumps(items, indent=2))
+            return 0
+        for e in items:
+            start = e["start"].get("dateTime", e["start"].get("date"))
+            loc = f" — {e['location']}" if e.get("location") else ""
+            print(f"- {start[:16].replace('T', ' ')} **{e.get('summary', '(no title)')}**{loc}")
+        return 0
+
+    body = {"summary": a.title, "start": when(a.start), "end": when(a.end), "description": a.description}
+    ev = cal.events().insert(calendarId=a.calendar, body=body).execute()
+    print(f"created: {ev.get('htmlLink')}")
+    return 0
+
+
+if __name__ == "__main__":
+    sm.run_main(main)

@@ -1,0 +1,100 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["google-api-python-client>=2.150", "google-auth-oauthlib>=1.2"]
+# ///
+"""gmail — read Gmail from the command line (read-only scope).
+
+Usage:
+  gmail search "query" [-n N] [--json]    Gmail search syntax, e.g. 'from:newsletter@x.com newer_than:1d'
+  gmail get <message-id> [--html]         one message as markdown-ish text (headers + body)
+  gmail labels                            list labels
+
+Auth: OAuth token shared with gcal/gdrive, kept in Bitwarden (see lib/google_auth.py).
+Exit codes: 0 ok · 1 API error · 2 usage · 3 bw missing · 4 locked · 5 credentials missing
+"""
+
+import argparse
+import base64
+import html
+import json
+import re
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+import google_auth  # noqa: E402
+import sm  # noqa: E402
+
+
+def header(msg: dict, name: str) -> str:
+    return next((h["value"] for h in msg["payload"].get("headers", []) if h["name"].lower() == name.lower()), "")
+
+
+def body(part: dict, want: str) -> str:
+    if part.get("mimeType") == want and part.get("body", {}).get("data"):
+        return base64.urlsafe_b64decode(part["body"]["data"]).decode("utf-8", "replace")
+    for p in part.get("parts", []) or []:
+        found = body(p, want)
+        if found:
+            return found
+    return ""
+
+
+def strip_html(s: str) -> str:
+    s = re.sub(r"(?is)<(script|style).*?</\1>", "", s)
+    s = re.sub(r"(?i)<br\s*/?>|</p>|</div>|</h\d>|</li>", "\n", s)
+    s = re.sub(r"<[^>]+>", "", s)
+    return re.sub(r"\n{3,}", "\n\n", html.unescape(s)).strip()
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(prog="gmail", add_help=False)
+    ap.add_argument("-h", "--help", action="store_true")
+    sub = ap.add_subparsers(dest="cmd")
+    s = sub.add_parser("search", add_help=False)
+    s.add_argument("query")
+    s.add_argument("-n", type=int, default=20)
+    s.add_argument("--json", action="store_true")
+    g = sub.add_parser("get", add_help=False)
+    g.add_argument("id")
+    g.add_argument("--html", action="store_true")
+    sub.add_parser("labels", add_help=False)
+    try:
+        a = ap.parse_args()
+    except SystemExit:
+        return sm.EX_USAGE
+    if a.help or not a.cmd:
+        print(__doc__)
+        return sm.EX_OK if a.help else sm.EX_USAGE
+
+    svc = google_auth.service("gmail", "v1").users()
+    if a.cmd == "labels":
+        for l in svc.labels().list(userId="me").execute().get("labels", []):
+            print(f"- {l['name']} ({l['id']})")
+        return 0
+
+    if a.cmd == "search":
+        ids = svc.messages().list(userId="me", q=a.query, maxResults=a.n).execute().get("messages", [])
+        rows = []
+        for m in ids:
+            msg = svc.messages().get(userId="me", id=m["id"], format="metadata",
+                                     metadataHeaders=["From", "Subject", "Date"]).execute()
+            rows.append({"id": m["id"], "from": header(msg, "From"), "subject": header(msg, "Subject"),
+                         "date": header(msg, "Date"), "snippet": html.unescape(msg.get("snippet", ""))})
+        if a.json:
+            print(json.dumps(rows, indent=2, ensure_ascii=False))
+        else:
+            for r in rows:
+                print(f"- `{r['id']}` **{r['subject']}** — {r['from']} — {r['date']}")
+        return 0
+
+    msg = svc.messages().get(userId="me", id=a.id, format="full").execute()
+    raw_html = body(msg["payload"], "text/html")
+    text = raw_html if a.html else (body(msg["payload"], "text/plain") or strip_html(raw_html))
+    print(f"# {header(msg, 'Subject')}\n\nFrom: {header(msg, 'From')}  \nDate: {header(msg, 'Date')}\n\n{text}")
+    return 0
+
+
+if __name__ == "__main__":
+    sm.run_main(main)

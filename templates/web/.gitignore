@@ -1,0 +1,12 @@
+
+# --- system-manager template ---
+.DS_Store
+.envrc.local
+.env
+.env.*
+!.env.example
+.wrangler/
+.next/
+test-results/
+playwright-report/
+playwright/.cache/

@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# wt — create a git worktree for a branch and open a Claude Code session in it.
+#
+# Rule: one Claude session per worktree; never two sessions in one working tree.
+#
+# Usage:
+#   wt <branch>              worktree at ../<repo>.wt/<branch> (creates the branch from HEAD if new)
+#   wt <branch> --no-claude  create the worktree, print its path, don't start claude
+#   wt --list                list worktrees of the current repo
+#   wt --remove <branch>     remove a worktree (refuses if it has uncommitted changes)
+#
+# Exit codes: 0 ok · 1 git failed · 2 usage / not in a repo · 3 git or claude missing
+set -euo pipefail
+. "$(dirname "$0")/../lib/common.sh"
+sm_wants_help "$@"
+sm_need git
+
+[ $# -ge 1 ] || { sm_usage >&2; exit "$EX_USAGE"; }
+top="$(git rev-parse --show-toplevel 2>/dev/null)" || sm_die "$EX_USAGE" "not inside a git repo"
+# Always anchor on the main worktree, even when called from inside another worktree.
+main="$(git -C "$top" worktree list --porcelain | awk '/^worktree /{print substr($0, 10); exit}')"
+base="$(dirname "$main")/$(basename "$main").wt"
+
+case "$1" in
+  --list) git -C "$main" worktree list; exit "$EX_OK" ;;
+  --remove)
+    [ -n "${2:-}" ] || sm_die "$EX_USAGE" "--remove needs a branch"
+    git -C "$main" worktree remove "$base/$2" || exit "$EX_FAIL"
+    exit "$EX_OK" ;;
+  -*) sm_usage >&2; exit "$EX_USAGE" ;;
+esac
+
+branch="$1"
+dir="$base/$branch"
+
+if [ -d "$dir" ]; then
+  sm_info "worktree exists: $dir"
+elif git -C "$main" show-ref --verify --quiet "refs/heads/$branch"; then
+  git -C "$main" worktree add "$dir" "$branch" || exit "$EX_FAIL"
+else
+  git -C "$main" worktree add -b "$branch" "$dir" || exit "$EX_FAIL"
+fi
+
+if [ "${2:-}" = "--no-claude" ]; then
+  printf '%s\n' "$dir"
+  exit "$EX_OK"
+fi
+
+sm_need claude
+cd "$dir"
+exec claude

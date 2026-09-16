@@ -1,0 +1,11 @@
+# feeds-sync sources — one per line. See `feeds-sync --help`.
+#
+#   <rss url>                  summary from the feed
+#   <rss url>  full            teaser-only feed: fetch full text with firecrawl
+#   gmail: <gmail search>      newsletters, e.g.  gmail: from:newsletter@example.com
+#
+# Paywalled outlets: subscribe to their email newsletters and add a gmail: line.
+# Scraping paywalled pages with your login is a terms-of-service question and is not supported.
+
+https://simonwillison.net/atom/everything/
+https://hnrss.org/best

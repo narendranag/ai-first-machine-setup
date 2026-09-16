@@ -1,0 +1,2 @@
+This file marks the public template. /setup deletes it when it turns a copy into your private instance.
+While it exists, the pre-commit hook refuses to commit any docs/machines/ file except _example.md.

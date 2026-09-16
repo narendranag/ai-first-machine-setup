@@ -1,0 +1,16 @@
+# justfile — setup / test / lint / run are the contract every repo keeps.
+
+setup:
+    uv sync
+
+test:
+    uv run pytest
+
+lint:
+    uv run ruff check . && uv run ruff format --check . && uv run pyright
+
+run *args:
+    uv run {{name}} {{args}}
+
+install:
+    uv tool install --force .

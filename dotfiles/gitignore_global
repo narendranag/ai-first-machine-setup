@@ -1,0 +1,10 @@
+.DS_Store
+._*
+.env
+.env.*
+!.env.example
+.envrc.local
+*.swp
+.idea/
+.vscode/*.log
+**/browse/profiles/

@@ -1,0 +1,281 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
+"""tasks-sync — collect TASKS.md from every brain into read-only copies in the vault.
+
+A brain is any folder with a CLAUDE.md. Each brain's TASKS.md is the source of truth;
+this script only reads them and writes generated copies:
+
+  <vault>/maps/tasks.md               every open task by brain, Now first, overdue flagged
+  <vault>/projects/<brain>.md         a marker-delimited "## Tasks" block (hub created if missing)
+
+Task format (shared by every brain):
+  ## Now / ## Next / ## Later / ## Done
+  ## Unassigned                         vault/TASKS.md only: action items no brain owns yet
+  - [ ] text 📅 2026-10-01 #tag         open, optional due date and tags
+  - [x] text ✅ 2026-09-15              done, optional completion date
+
+Usage:
+  tasks-sync [--home DIR] [--vault DIR] [--dry-run] [--json]
+
+  --home DIR   root to search (default: $HOME)
+  --vault DIR  vault to write into (default: <home>/vault)
+  --dry-run    report what would change; write nothing
+  --json       print all tasks as JSON on stdout (for /today and /review); implies no writes
+
+Overflow: ## Unassigned items render at the top of maps/tasks.md. /review must give each one an owner or
+move it to ## Later. When there are more than 10, tasks-sync sends one tg-send alert per day.
+
+Brains searched: system-manager, archive, vault, resources, library/camera,
+and every child of projects/, products/, personal/ that has a CLAUDE.md.
+
+Exit codes: 0 ok · 2 usage · 5 vault missing
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import os
+import re
+import subprocess
+import sys
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+
+SECTIONS = ("Now", "Next", "Later", "Done", "Unassigned")
+OPEN_SECTIONS = ("Now", "Next", "Later")
+UNASSIGNED_ALERT = 10
+STATE = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "system-manager/tasks-sync.json"
+START = "<!-- tasks-sync:start — generated, edit the brain's TASKS.md instead -->"
+END = "<!-- tasks-sync:end -->"
+BLOCK_RE = re.compile(r"<!-- tasks-sync:start.*?-->.*?<!-- tasks-sync:end -->", re.S)
+TASK_RE = re.compile(r"^\s*- \[( |x|X)\]\s+(.*)$")
+DUE_RE = re.compile(r"📅\s*(\d{4}-\d{2}-\d{2})")
+DONE_RE = re.compile(r"✅\s*(\d{4}-\d{2}-\d{2})")
+TAG_RE = re.compile(r"(?<!\S)#([\w/-]+)")
+FIXED_BRAINS = ("system-manager", "archive", "vault", "resources", "library/camera")
+CONTAINERS = ("projects", "products", "personal")
+RECENT_DONE_DAYS = 7
+
+
+@dataclass
+class Task:
+    brain: str
+    section: str
+    text: str
+    done: bool
+    due: str | None = None
+    completed: str | None = None
+    tags: list[str] = field(default_factory=list)
+    overdue: bool = False
+
+
+def find_brains(home: Path) -> list[tuple[str, Path]]:
+    dirs = [home / b for b in FIXED_BRAINS]
+    for c in CONTAINERS:
+        base = home / c
+        if base.is_dir():
+            dirs += sorted(p for p in base.iterdir() if p.is_dir() and not p.name.startswith("."))
+    brains = [d for d in dirs if (d / "CLAUDE.md").is_file()]
+    # Name = folder name; prefix the container when two brains share a name.
+    names = [d.name for d in brains]
+    out = []
+    for d in brains:
+        name = d.name if names.count(d.name) == 1 else f"{d.parent.name}-{d.name}"
+        out.append((name, d))
+    return out
+
+
+def parse(brain: str, path: Path, today: dt.date) -> list[Task]:
+    tasks: list[Task] = []
+    section = None
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.startswith("## "):
+            title = line[3:].strip()
+            section = title if title in SECTIONS else None
+            continue
+        m = TASK_RE.match(line)
+        if not (m and section):
+            continue
+        body = m.group(2).strip()
+        due = DUE_RE.search(body)
+        comp = DONE_RE.search(body)
+        t = Task(
+            brain=brain,
+            section=section,
+            text=body,
+            done=m.group(1).lower() == "x" or section == "Done",
+            due=due.group(1) if due else None,
+            completed=comp.group(1) if comp else None,
+            tags=TAG_RE.findall(body),
+        )
+        if t.due and not t.done:
+            try:
+                t.overdue = dt.date.fromisoformat(t.due) < today
+            except ValueError:
+                pass
+        tasks.append(t)
+    return tasks
+
+
+def fmt(t: Task) -> str:
+    box = "x" if t.done else " "
+    flag = " ⚠️ overdue" if t.overdue else ""
+    return f"- [{box}] {t.text}{flag}"
+
+
+def render_map(by_brain: dict[str, list[Task]], today: dt.date) -> str:
+    recent = today - dt.timedelta(days=RECENT_DONE_DAYS)
+    lines = [
+        "---",
+        "type: map",
+        "generated: tasks-sync",
+        "---",
+        "",
+        "# Tasks",
+        "",
+        "> [!warning] Generated by `tasks-sync`. Read-only: change a task by telling the brain that owns it.",
+        "",
+    ]
+    unassigned = [t for ts in by_brain.values() for t in ts if t.section == "Unassigned" and not t.done]
+    if unassigned:
+        lines += [f"## Unassigned ({len(unassigned)})", "",
+                  "> [!important] No brain owns these yet. `/review` gives each an owner or moves it to Later.", ""]
+        lines += [fmt(t) for t in unassigned] + [""]
+    overdue = [t for ts in by_brain.values() for t in ts if t.overdue]
+    if overdue:
+        lines += ["## Overdue", ""] + [f"{fmt(t)} — [[{t.brain}]]" for t in overdue] + [""]
+    now = [t for ts in by_brain.values() for t in ts if t.section == "Now" and not t.done]
+    if now:
+        lines += ["## Now, everywhere", ""] + [f"{fmt(t)} — [[{t.brain}]]" for t in now] + [""]
+    lines += ["## By brain", ""]
+    for brain in sorted(by_brain):
+        ts = by_brain[brain]
+        open_ts = [t for t in ts if not t.done]
+        closed = [t for t in ts if t.done and t.completed and t.completed >= recent.isoformat()]
+        open_ts = [t for t in open_ts if t.section != "Unassigned"]
+        if not open_ts and not closed:
+            continue
+        lines += [f"### [[{brain}]]", ""]
+        for sec in OPEN_SECTIONS:
+            sec_ts = [t for t in open_ts if t.section == sec]
+            if sec_ts:
+                lines += [f"**{sec}**", ""] + [fmt(t) for t in sec_ts] + [""]
+        if closed:
+            lines += [f"**Closed in the last {RECENT_DONE_DAYS} days**", ""] + [fmt(t) for t in closed] + [""]
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def render_block(tasks: list[Task]) -> str:
+    lines = [START, "## Tasks", ""]
+    open_ts = [t for t in tasks if not t.done]
+    if not open_ts:
+        lines.append("_No open tasks._")
+    for sec in OPEN_SECTIONS:
+        sec_ts = [t for t in open_ts if t.section == sec]
+        if sec_ts:
+            lines += [f"**{sec}**", ""] + [fmt(t) for t in sec_ts] + [""]
+    return "\n".join(lines).rstrip() + "\n" + END
+
+
+def update_hub(existing: str | None, brain: str, block: str, today: dt.date) -> str:
+    if existing is None:
+        return (
+            f"---\ntype: project\ncreated: {today.isoformat()}\nstatus: active\n"
+            f"project: {brain}\ntags: []\n---\n\n# {brain}\n\n{block}\n"
+        )
+    if BLOCK_RE.search(existing):
+        return BLOCK_RE.sub(lambda _: block, existing, count=1)
+    return existing.rstrip() + "\n\n" + block + "\n"
+
+
+def write(path: Path, content: str, dry: bool, changes: list[str]) -> None:
+    old = path.read_text(encoding="utf-8") if path.exists() else None
+    if old == content:
+        return
+    changes.append(str(path))
+    if not dry:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+
+
+def alert_unassigned(count: int, today: dt.date, dry: bool) -> bool:
+    """One tg-send per day while the Unassigned pile is over the limit."""
+    if count <= UNASSIGNED_ALERT or dry:
+        return False
+    try:
+        state = json.loads(STATE.read_text()) if STATE.is_file() else {}
+    except (OSError, json.JSONDecodeError):
+        state = {}
+    if state.get("unassigned_alerted_on") == today.isoformat():
+        return False
+    tg = Path(__file__).resolve().parent / "tg-send"
+    r = subprocess.run([str(tg), f"{count} unassigned tasks in the vault — run /review to give them owners"],
+                       capture_output=True, text=True)
+    if r.returncode == 0:
+        STATE.parent.mkdir(parents=True, exist_ok=True)
+        STATE.write_text(json.dumps({**state, "unassigned_alerted_on": today.isoformat(), "count": count}))
+        return True
+    return False
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(add_help=False)
+    ap.add_argument("-h", "--help", action="store_true")
+    ap.add_argument("--home", type=Path, default=Path.home())
+    ap.add_argument("--vault", type=Path)
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--json", action="store_true")
+    try:
+        args = ap.parse_args()
+    except SystemExit:
+        return 2
+    if args.help:
+        print(__doc__)
+        return 0
+
+    home = args.home.expanduser()
+    vault = (args.vault or home / "vault").expanduser()
+    today = dt.date.today()
+
+    by_brain: dict[str, list[Task]] = {}
+    for name, d in find_brains(home):
+        tf = d / "TASKS.md"
+        by_brain[name] = parse(name, tf, today) if tf.is_file() else []
+
+    if args.json:
+        json.dump({b: [asdict(t) for t in ts] for b, ts in by_brain.items()}, sys.stdout, ensure_ascii=False, indent=2)
+        print()
+        return 0
+
+    if not vault.is_dir():
+        print(f"tasks-sync: vault not found at {vault}", file=sys.stderr)
+        return 5
+
+    changes: list[str] = []
+    write(vault / "maps" / "tasks.md", render_map(by_brain, today), args.dry_run, changes)
+    for brain, ts in by_brain.items():
+        if brain == "vault":
+            continue
+        hub = vault / "projects" / f"{brain}.md"
+        old = hub.read_text(encoding="utf-8") if hub.exists() else None
+        write(hub, update_hub(old, brain, render_block(ts), today), args.dry_run, changes)
+
+    n_open = sum(1 for ts in by_brain.values() for t in ts if not t.done)
+    n_over = sum(1 for ts in by_brain.values() for t in ts if t.overdue)
+    n_unassigned = sum(1 for ts in by_brain.values() for t in ts if t.section == "Unassigned" and not t.done)
+    alerted = alert_unassigned(n_unassigned, today, args.dry_run)
+    verb = "would update" if args.dry_run else "updated"
+    print(f"tasks-sync: {len(by_brain)} brains, {n_open} open, {n_over} overdue, {n_unassigned} unassigned"
+          f"{' (alert sent)' if alerted else ''}; {verb} {len(changes)} files")
+    for c in changes:
+        print(f"  {c}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# pre-commit — block commits that contain secrets. Installed by /setup and bin/new-app:
+#   git config core.hooksPath .githooks      (this repo)
+#   cp .githooks/pre-commit .git/hooks/      (new apps)
+set -euo pipefail
+
+if ! command -v gitleaks >/dev/null 2>&1; then
+  echo "pre-commit: gitleaks not installed — refusing to commit unscanned. brew install gitleaks" >&2
+  exit 1
+fi
+gitleaks git --pre-commit --staged --redact --no-banner
+
+# In the public template (marked by the .template file, which /setup deletes in an instance),
+# machine files other than the example must never be committed.
+if [ -f .template ]; then
+  bad="$(git diff --cached --name-only | grep '^docs/machines/' | grep -v '_example.md$' || true)"
+  if [ -n "$bad" ]; then
+    echo "pre-commit: machine files belong in your private instance, not the template:" >&2
+    echo "$bad" >&2
+    exit 1
+  fi
+fi

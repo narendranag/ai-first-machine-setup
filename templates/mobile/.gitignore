@@ -1,0 +1,8 @@
+
+# --- system-manager template ---
+.DS_Store
+.envrc.local
+.env
+.env.*
+!.env.example
+.expo/

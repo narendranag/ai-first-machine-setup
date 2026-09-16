@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# archive-pull — find and restore items from the R2 archive.
+#
+# Usage:
+#   archive-pull --search <text>          search INDEX.md (case-insensitive); rebuilds it if missing
+#   archive-pull <remote-path> [DEST]     restore a file or folder (default DEST: ~/archive/<remote-path>)
+#   archive-pull --reindex                rebuild INDEX.md from R2
+#
+# Restores never overwrite: an existing DEST is an error. R2 keeps its copy.
+# Exit codes: 0 ok (search: found) · 1 failed / nothing found · 2 usage · 3 rclone missing · 4 locked · 5 config
+set -euo pipefail
+. "$(dirname "$0")/../lib/common.sh"
+sm_wants_help "$@"
+
+ARCHIVE="${SM_ARCHIVE:-$HOME/archive}"
+case "${1:-}" in
+  "") sm_usage >&2; exit "$EX_USAGE" ;;
+  --reindex) exec "$(dirname "$0")/archive-push" --index-only ;;
+  --search)
+    [ -n "${2:-}" ] || sm_die "$EX_USAGE" "--search needs text"
+    [ -f "$ARCHIVE/INDEX.md" ] || "$(dirname "$0")/archive-push" --index-only
+    grep -i -- "$2" "$ARCHIVE/INDEX.md" | grep '^- `' || exit "$EX_FAIL"
+    exit "$EX_OK" ;;
+  -*) sm_usage >&2; exit "$EX_USAGE" ;;
+esac
+
+sm_need jq
+rel="${1#/}"
+dest="${2:-$ARCHIVE/$rel}"
+[ -e "$dest" ] && sm_die "$EX_USAGE" "$dest exists; not overwriting"
+
+sm_r2_env
+src="r2:$SM_R2_BUCKET/archive/$rel"
+kind="$(rclone lsjson --stat "$src" 2>/dev/null | jq -r 'if .IsDir then "dir" else "file" end')" ||
+  sm_die "$EX_FAIL" "not found in archive: $rel"
+
+sm_info "[$(sm_host)] restore $rel → $dest"
+if [ "$kind" = "dir" ]; then
+  rclone copy --checksum --progress "$src" "$dest" || exit "$EX_FAIL"
+else
+  mkdir -p "$(dirname "$dest")"
+  rclone copyto --checksum --progress "$src" "$dest" || exit "$EX_FAIL"
+fi
+printf '%s\n' "$dest"

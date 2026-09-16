@@ -1,0 +1,1 @@
+../../claude-global/commands/setup.md

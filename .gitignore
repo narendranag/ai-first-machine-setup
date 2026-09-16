@@ -1,0 +1,59 @@
+# ---------------------------------------------------------------
+# This is a PUBLIC template. Nothing personal may be committed.
+# ---------------------------------------------------------------
+
+# Local working notes — never part of the template
+*.zip
+_private/
+
+# Machine files: only the example ships. Real ones belong in the private instance.
+docs/machines/*
+!docs/machines/_example.md
+
+# Secrets — these live in Bitwarden, never on disk in a repo
+.env
+.env.*
+!.env.example
+.envrc.local
+*.pem
+*.key
+*.p12
+*.age
+id_rsa*
+id_ed25519*
+credentials.json
+token.json
+*.token
+secrets/
+.secrets/
+rclone.conf
+bw-session*
+
+# Browser profiles hold logged-in sessions — never in a repo
+**/browse/profiles/
+
+# Generated/personal state
+INDEX.md
+!templates/**/INDEX.md
+*.log
+.claude/settings.local.json
+
+# Tooling
+node_modules/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+dist/
+build/
+
+# OS / editor
+.DS_Store
+.AppleDouble
+Icon?
+._*
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.swp

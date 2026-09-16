@@ -1,0 +1,117 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["google-api-python-client>=2.150", "google-auth-oauthlib>=1.2"]
+# ///
+"""gdrive — Google Drive from the command line.
+
+Usage:
+  gdrive search "text" [-n N] [--json]         files whose name or content matches
+  gdrive download <file-id> [DEST]             Google Docs/Sheets/Slides export as docx/xlsx/pptx
+  gdrive upload <path> [--folder ID]           upload a file; prints its id and link
+  gdrive share <file-id> <email> [--role reader|commenter|writer]
+                                               share with a person (sends Google's notification)
+
+Auth: OAuth token shared with gcal/gmail, kept in Bitwarden (see lib/google_auth.py).
+Exit codes: 0 ok · 1 API error · 2 usage · 3 bw missing · 4 locked · 5 credentials missing
+"""
+
+import argparse
+import io
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+import google_auth  # noqa: E402
+import sm  # noqa: E402
+
+EXPORTS = {
+    "application/vnd.google-apps.document": ("application/vnd.openxmlformats-officedocument.wordprocessingml.document", ".docx"),
+    "application/vnd.google-apps.spreadsheet": ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", ".xlsx"),
+    "application/vnd.google-apps.presentation": ("application/vnd.openxmlformats-officedocument.presentationml.presentation", ".pptx"),
+}
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(prog="gdrive", add_help=False)
+    ap.add_argument("-h", "--help", action="store_true")
+    sub = ap.add_subparsers(dest="cmd")
+    s = sub.add_parser("search", add_help=False)
+    s.add_argument("text")
+    s.add_argument("-n", type=int, default=20)
+    s.add_argument("--json", action="store_true")
+    d = sub.add_parser("download", add_help=False)
+    d.add_argument("id")
+    d.add_argument("dest", nargs="?")
+    u = sub.add_parser("upload", add_help=False)
+    u.add_argument("path")
+    u.add_argument("--folder")
+    sh = sub.add_parser("share", add_help=False)
+    sh.add_argument("id")
+    sh.add_argument("email")
+    sh.add_argument("--role", default="reader", choices=["reader", "commenter", "writer"])
+    try:
+        a = ap.parse_args()
+    except SystemExit:
+        return sm.EX_USAGE
+    if a.help or not a.cmd:
+        print(__doc__)
+        return sm.EX_OK if a.help else sm.EX_USAGE
+
+    from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
+
+    drive = google_auth.service("drive", "v3")
+    files = drive.files()
+
+    if a.cmd == "search":
+        q = a.text.replace("\\", "\\\\").replace("'", "\\'")
+        res = files.list(q=f"(name contains '{q}' or fullText contains '{q}') and trashed = false",
+                         pageSize=a.n, fields="files(id,name,mimeType,modifiedTime,webViewLink)").execute()
+        items = res.get("files", [])
+        if a.json:
+            print(json.dumps(items, indent=2))
+        else:
+            for f in items:
+                print(f"- `{f['id']}` [{f['name']}]({f['webViewLink']}) — {f['modifiedTime'][:10]}")
+        return 0
+
+    if a.cmd == "download":
+        meta = files.get(fileId=a.id, fields="name,mimeType").execute()
+        if meta["mimeType"] in EXPORTS:
+            mime, ext = EXPORTS[meta["mimeType"]]
+            req, name = files.export_media(fileId=a.id, mimeType=mime), meta["name"] + ext
+        else:
+            req, name = files.get_media(fileId=a.id), meta["name"]
+        dest = Path(a.dest or name)
+        if dest.is_dir():
+            dest = dest / name
+        if dest.exists():
+            raise sm.SMError(sm.EX_FAIL, f"{dest} exists; not overwriting")
+        buf = io.BytesIO()
+        dl = MediaIoBaseDownload(buf, req)
+        done = False
+        while not done:
+            _, done = dl.next_chunk()
+        dest.write_bytes(buf.getvalue())
+        print(dest)
+        return 0
+
+    if a.cmd == "upload":
+        p = Path(a.path)
+        if not p.is_file():
+            raise sm.SMError(sm.EX_USAGE, f"no such file: {p}")
+        body = {"name": p.name, **({"parents": [a.folder]} if a.folder else {})}
+        f = files.create(body=body, media_body=MediaFileUpload(str(p), resumable=True),
+                         fields="id,webViewLink").execute()
+        print(f"{f['id']} {f['webViewLink']}")
+        return 0
+
+    drive.permissions().create(fileId=a.id, body={"type": "user", "role": a.role, "emailAddress": a.email},
+                               sendNotificationEmail=True).execute()
+    print(f"shared {a.id} with {a.email} as {a.role}")
+    return 0
+
+
+if __name__ == "__main__":
+    sm.run_main(main)

@@ -1,0 +1,268 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
+"""map-check — diff what is installed on this machine against docs/machines/<host>.md.
+
+Compares, for this host:
+  brew       `brew leaves` + casks   vs  Brewfile layers in the frontmatter + "## Brew (checked)"
+  vscode     `code --list-extensions` vs vscode-extensions.txt + "## VS Code extensions (checked)"
+  launchd    non-Apple plists in LaunchAgents/LaunchDaemons vs "## launchd jobs (checked)"
+  ports      non-loopback TCP listeners vs "## Listening ports (checked)"
+  macparakeet  `macparakeet-cli health --json`: database ok, Parakeet v3 downloaded (only if the app is installed)
+then runs bin/security-check.
+
+"missing" = recorded but not present. "unrecorded" = present but not in the map.
+Map bullets may be globs (`com.google.*`) to accept a vendor's helpers in one line.
+Either is drift: fix the machine or fix the map, in the same session.
+
+Usage:
+  map-check [--host NAME] [--only brew,vscode,launchd,ports,macparakeet,security]
+
+Exit codes: 0 no drift · 1 drift or a security FAIL · 2 usage · 5 no machine file
+"""
+
+from __future__ import annotations
+
+import argparse
+import fnmatch
+import re
+import shutil
+import socket
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+LAYER_FILES = {"base": "Brewfile", "dev": "Brewfile.dev", "server": "Brewfile.server"}
+CHECKS = ("brew", "vscode", "launchd", "ports", "macparakeet", "security")
+MACPARAKEET_CLI = "/Applications/MacParakeet.app/Contents/MacOS/macparakeet-cli"
+BREW_LINE = re.compile(r'^\s*(brew|cask|mas)\s+"([^"]+)"')
+
+
+def run(cmd: list[str]) -> str:
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=120).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+
+def host_name() -> str:
+    if shutil.which("scutil"):
+        out = run(["scutil", "--get", "LocalHostName"]).strip()
+        if out:
+            return out
+    return socket.gethostname().split(".")[0]
+
+
+def frontmatter(text: str) -> dict[str, str | list[str]]:
+    m = re.match(r"^---\n(.*?)\n---\n", text, re.S)
+    data: dict[str, str | list[str]] = {}
+    if not m:
+        return data
+    for line in m.group(1).splitlines():
+        if ":" not in line:
+            continue
+        k, v = line.split(":", 1)
+        v = re.sub(r"\s+#.*$", "", v).strip()
+        if v.startswith("[") and v.endswith("]"):
+            data[k.strip()] = [x.strip() for x in v[1:-1].split(",") if x.strip()]
+        else:
+            data[k.strip()] = v
+    return data
+
+
+def checked_section(text: str, heading: str) -> set[str]:
+    """First backticked token of each bullet under '## <heading> (checked)'."""
+    m = re.search(rf"^## {re.escape(heading)} \(checked\)\s*$(.*?)(?=^## |\Z)", text, re.S | re.M)
+    items: set[str] = set()
+    if m:
+        for line in m.group(1).splitlines():
+            b = re.match(r"^\s*-\s+`([^`]+)`", line)
+            if b:
+                items.add(b.group(1).strip())
+    return items
+
+
+def unmatched(have: set[str], patterns: set[str]) -> set[str]:
+    """Items in `have` matched by no pattern. Map entries may be globs, e.g. `com.google.*`."""
+    return {h for h in have if not any(fnmatch.fnmatchcase(h, p) for p in patterns)}
+
+
+def unfilled(patterns: set[str], have: set[str]) -> set[str]:
+    """Literal (non-glob) patterns with no matching item."""
+    return {p for p in patterns if not any(c in p for c in "*?[") and p not in have}
+
+
+def short(name: str) -> str:
+    return name.rsplit("/", 1)[-1].lower()
+
+
+def brew_expected(layers: list[str]) -> tuple[set[str], list[str]]:
+    names: set[str] = set()
+    problems: list[str] = []
+    for layer in layers:
+        f = ROOT / LAYER_FILES.get(layer, f"Brewfile.{layer}")
+        if not f.is_file():
+            problems.append(f"layer '{layer}' has no file {f.name}")
+            continue
+        for line in f.read_text().splitlines():
+            m = BREW_LINE.match(line)
+            if m and m.group(1) in ("brew", "cask"):
+                names.add(short(m.group(2)))
+    return names, problems
+
+
+def check_brew(fm: dict, text: str) -> list[str]:
+    if not shutil.which("brew"):
+        return ["brew not installed"]
+    layers = fm.get("brewfile_layers") or ["base"]
+    layers = layers if isinstance(layers, list) else [layers]
+    expected, problems = brew_expected(layers)
+    expected |= {short(x) for x in checked_section(text, "Brew")}
+    casks = {short(x) for x in run(["brew", "list", "--cask", "-1"]).split()}
+    # "missing" checks against everything installed (a recorded formula may also be a dependency);
+    # "unrecorded" checks only what was installed on request, so dependencies don't count as drift.
+    everything = {short(x) for x in run(["brew", "list", "--formula", "-1"]).split()} | casks
+    requested = {short(x) for x in run(["brew", "leaves", "--installed-on-request"]).split()} | casks
+    out = problems
+    out += [f"missing: {x}" for x in sorted(unfilled(expected, everything))]
+    out += [f"unrecorded: {x}" for x in sorted(unmatched(requested, expected))]
+    return out
+
+
+def check_vscode(text: str) -> list[str]:
+    if not shutil.which("code"):
+        return []
+    listfile = ROOT / "vscode-extensions.txt"
+    expected = set()
+    if listfile.is_file():
+        expected = {l.strip().lower() for l in listfile.read_text().splitlines() if l.strip() and not l.startswith("#")}
+    expected |= {x.lower() for x in checked_section(text, "VS Code extensions")}
+    installed = {x.strip().lower() for x in run(["code", "--list-extensions"]).split()}
+    return [f"missing: {x}" for x in sorted(expected - installed)] + [
+        f"unrecorded: {x}" for x in sorted(installed - expected)
+    ]
+
+
+def check_launchd(text: str) -> list[str]:
+    dirs = [Path.home() / "Library/LaunchAgents", Path("/Library/LaunchAgents"), Path("/Library/LaunchDaemons")]
+    present = set()
+    for d in dirs:
+        if d.is_dir():
+            present |= {p.stem for p in d.glob("*.plist") if not p.stem.startswith("com.apple.")}
+    if not any(d.is_dir() for d in dirs):
+        return []  # not macOS
+    expected = checked_section(text, "launchd jobs")
+    return [f"missing: {x}" for x in sorted(unfilled(expected, present))] + [
+        f"unrecorded: {x}" for x in sorted(unmatched(present, expected))
+    ]
+
+
+def listening_ports() -> dict[str, str]:
+    ports: dict[str, str] = {}
+    if shutil.which("lsof"):
+        for line in run(["lsof", "-nP", "-iTCP", "-sTCP:LISTEN"]).splitlines()[1:]:
+            parts = line.split()
+            if len(parts) < 9:
+                continue
+            addr = parts[8]
+            if addr.startswith(("127.", "[::1]", "localhost")):
+                continue
+            ports.setdefault(addr.rsplit(":", 1)[-1], parts[0])
+    elif shutil.which("ss"):
+        for line in run(["ss", "-Htlnp"]).splitlines():
+            parts = line.split()
+            if len(parts) < 4 or parts[3].startswith(("127.", "[::1]")):
+                continue
+            proc = re.search(r'"([^"]+)"', line)
+            ports.setdefault(parts[3].rsplit(":", 1)[-1], proc.group(1) if proc else "?")
+    return ports
+
+
+def check_ports(text: str) -> list[str]:
+    present = listening_ports()
+    expected = checked_section(text, "Listening ports")
+    out = [f"missing: {p}" for p in sorted(expected - present.keys(), key=lambda x: int(x) if x.isdigit() else 0)]
+    out += [f"unrecorded: {p} ({present[p]})" for p in sorted(present.keys() - expected, key=lambda x: int(x) if x.isdigit() else 0)]
+    return out
+
+
+def check_macparakeet() -> list[str]:
+    import json
+
+    cli = shutil.which("macparakeet-cli") or (MACPARAKEET_CLI if Path(MACPARAKEET_CLI).exists() else None)
+    if not cli:
+        return []  # not installed on this machine: nothing to check
+    out = []
+    if not shutil.which("macparakeet-cli"):
+        out.append("macparakeet-cli not on PATH (setup-tools.sh --only macparakeet)")
+    try:
+        h = json.loads(run([cli, "health", "--json"]) or "{}")
+    except json.JSONDecodeError:
+        return out + ["health --json returned no JSON"]
+    if (h.get("database") or {}).get("status") != "ok":
+        out.append(f"database: {(h.get('database') or {}).get('status', 'unknown')}")
+    stack = h.get("speechStack") or {}
+    if not stack.get("parakeetModelDownloaded"):
+        out.append("Parakeet model not downloaded (human step: MacParakeet onboarding)")
+    elif stack.get("parakeetModelVariant") != "v3":
+        out.append(f"Parakeet model is {stack.get('parakeetModelVariant')}, expected v3")
+    return out
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(add_help=False)
+    ap.add_argument("-h", "--help", action="store_true")
+    ap.add_argument("--host")
+    ap.add_argument("--only", default=",".join(CHECKS))
+    try:
+        args = ap.parse_args()
+    except SystemExit:
+        return 2
+    if args.help:
+        print(__doc__)
+        return 0
+    only = [c.strip() for c in args.only.split(",") if c.strip()]
+    if any(c not in CHECKS for c in only):
+        print(f"map-check: --only takes {','.join(CHECKS)}", file=sys.stderr)
+        return 2
+
+    host = args.host or host_name()
+    mf = ROOT / "docs" / "machines" / f"{host}.md"
+    if not mf.is_file():
+        print(f"[{host}] map-check: no machine file at docs/machines/{host}.md — run /setup", file=sys.stderr)
+        return 5
+    text = mf.read_text()
+    fm = frontmatter(text)
+
+    drift = 0
+    results = {
+        "brew": lambda: check_brew(fm, text),
+        "vscode": lambda: check_vscode(text),
+        "launchd": lambda: check_launchd(text),
+        "ports": lambda: check_ports(text),
+        "macparakeet": check_macparakeet,
+    }
+    print(f"[{host}] map-check against docs/machines/{host}.md")
+    for name in only:
+        if name == "security":
+            continue
+        lines = results[name]()
+        print(f"\n## {name}: {'ok' if not lines else f'{len(lines)} drift'}")
+        for l in lines:
+            print(f"  - {l}")
+        drift += len(lines)
+
+    sec_rc = 0
+    if "security" in only:
+        print("\n## security")
+        sec_rc = subprocess.run([str(ROOT / "bin" / "security-check")]).returncode
+
+    print(f"\n[{host}] {'no drift' if drift == 0 else f'{drift} drift items'}; security {'ok' if sec_rc == 0 else 'FAIL'}")
+    return 0 if drift == 0 and sec_rc == 0 else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

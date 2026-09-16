@@ -1,0 +1,15 @@
+# Brewfile.dev — build machines, on top of Brewfile.
+# Install: brew bundle --file Brewfile.dev
+
+cask "orbstack"                         # Docker for Python services and self-hosted things
+cask "darktable"                        # RAW processing (library/camera brain)
+cask "calibre"                          # books and comics libraries
+
+brew "wrangler"                         # Cloudflare Workers, D1, R2, DNS
+brew "biome"
+brew "ruff"
+brew "pyright"
+brew "mermaid-cli"                      # diagrams (mmdc)
+brew "ccusage"                          # Claude Code usage
+
+mas "Xcode", id: 497799835              # needs an Apple ID signed in to the App Store

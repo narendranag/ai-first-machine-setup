@@ -1,0 +1,21 @@
+# justfile — setup / test / lint / run are the contract every repo keeps.
+
+setup:
+    pnpm install
+
+dev:
+    pnpm dev
+
+test:
+    pnpm vitest run
+
+e2e:
+    pnpm exec playwright test
+
+lint:
+    pnpm biome check .
+
+run: dev
+
+deploy:
+    pnpm build && pnpm wrangler deploy

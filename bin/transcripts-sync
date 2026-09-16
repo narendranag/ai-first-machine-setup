@@ -1,0 +1,303 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
+"""transcripts-sync — export completed MacParakeet transcriptions into the vault inbox, one note each.
+
+Reads MacParakeet's database read-only and writes, for each completed transcription not yet exported:
+
+  <vault>/inbox/transcripts/YYYY-MM-DD_<slug>.md
+
+  ---
+  type: transcript
+  source: meeting | file | url
+  date: YYYY-MM-DD            local date the recording was made
+  duration: HH:MM:SS
+  status: unprocessed         the vault brain sets `processed` when it files the note
+  macparakeet_id: <uuid>      the idempotency key
+  ...
+  ---
+
+Idempotent, two ways:
+  1. A cursor per machine (the database is per machine) at ~/.local/state/system-manager/transcripts-sync.json:
+     the (updatedAt, id) of the last row written. Only rows strictly after it are read.
+  2. Every note carries `macparakeet_id`. Before writing, the vault is checked for that id
+     (inbox/transcripts/ and sources/transcripts/), so a lost or reset cursor never duplicates a note.
+A transcript edited in MacParakeet after export moves past the cursor again: its note is refreshed if it is
+still `status: unprocessed`, and left alone once the vault brain has processed it.
+
+Dictation (the `dictations` table) is not exported: short dictation goes straight into vault/inbox/quick.md.
+Transcripts made with `macparakeet-cli transcribe … --no-history --output-dir ~/vault/inbox/transcripts`
+never reach the database, so they are not exported twice.
+
+Usage:
+  transcripts-sync [--vault DIR] [--db PATH] [--dry-run] [--reset] [--json]
+
+  --dry-run   list what would be written; move no cursor
+  --reset     forget the cursor and re-scan everything (the id check still prevents duplicates)
+  --json      machine-readable summary on stdout
+
+Runs: launchd agent watching the database file (`schedule install transcripts-sync`), the SessionStart hook,
+and on demand.
+Exit codes: 0 ok (including nothing new) · 1 a note failed to write · 2 usage · 5 database or vault missing
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import os
+import re
+import sqlite3
+import sys
+import tempfile
+import unicodedata
+from pathlib import Path
+
+DEFAULT_DB = Path.home() / "Library/Application Support/MacParakeet/macparakeet.db"
+STATE = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "system-manager/transcripts-sync.json"
+ID_RE = re.compile(r"^macparakeet_id:\s*(\S+)\s*$", re.M)
+STATUS_RE = re.compile(r"^status:\s*(\S+)\s*$", re.M)
+
+QUERY = """
+SELECT id, createdAt, updatedAt, fileName, sourceURL, sourceType, durationMs, speakerCount, isTranscriptEdited,
+       COALESCE(NULLIF(titleOverride, ''), NULLIF(derivedTitle, ''), fileName) AS title,
+       COALESCE(NULLIF(cleanTranscript, ''), rawTranscript) AS body
+FROM transcriptions
+WHERE status = 'completed'
+  AND COALESCE(NULLIF(cleanTranscript, ''), rawTranscript, '') != ''
+  AND (updatedAt > :u OR (updatedAt = :u AND id > :id))
+ORDER BY updatedAt, id
+"""
+
+
+# --- cursor -----------------------------------------------------------------------
+
+def load_cursor(reset: bool) -> dict:
+    if reset or not STATE.is_file():
+        return {"updatedAt": "", "id": ""}
+    try:
+        c = json.loads(STATE.read_text())
+        return {"updatedAt": c.get("updatedAt", ""), "id": c.get("id", "")}
+    except (OSError, json.JSONDecodeError):
+        return {"updatedAt": "", "id": ""}
+
+
+def save_cursor(updated_at: str, rid: str) -> None:
+    """Atomic write: a crash mid-save leaves the previous cursor, never a torn file."""
+    STATE.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=STATE.parent, prefix=".transcripts-sync.")
+    with os.fdopen(fd, "w") as fh:
+        json.dump({"updatedAt": updated_at, "id": rid, "savedAt": dt.datetime.now().isoformat(timespec="seconds")}, fh)
+    os.replace(tmp, STATE)
+
+
+# --- helpers ------------------------------------------------------------------------
+
+def local_dt(ts: str) -> dt.datetime:
+    """MacParakeet (GRDB) stores 'YYYY-MM-DD HH:MM:SS.SSS' in UTC."""
+    parsed = dt.datetime.fromisoformat(ts.replace(" ", "T"))
+    return parsed.replace(tzinfo=dt.timezone.utc).astimezone()
+
+
+def slugify(text: str, limit: int = 60) -> str:
+    text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode()
+    text = re.sub(r"\.(m4a|mp3|wav|mp4|mov|aac|flac|webm|ogg)$", "", text, flags=re.I)
+    slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+    return (slug[:limit].rstrip("-")) or "transcript"
+
+
+def hms(ms: int | None) -> str:
+    s = int((ms or 0) / 1000)
+    return f"{s // 3600:02d}:{s % 3600 // 60:02d}:{s % 60:02d}"
+
+
+def source_kind(row: sqlite3.Row) -> str:
+    st = (row["sourceType"] or "").lower()
+    if st == "meeting":
+        return "meeting"
+    if row["sourceURL"] or st in ("url", "youtube", "podcast", "media"):
+        return "url"
+    return "file"
+
+
+def yaml_str(v: str) -> str:
+    return json.dumps(v, ensure_ascii=False)  # a JSON string is a valid YAML scalar
+
+
+def existing_notes(vault: Path) -> dict[str, Path]:
+    """macparakeet_id -> note path, across the inbox and the processed archive."""
+    found: dict[str, Path] = {}
+    for d in (vault / "inbox/transcripts", vault / "sources/transcripts"):
+        if not d.is_dir():
+            continue
+        for p in d.glob("*.md"):
+            try:
+                head = p.read_text(encoding="utf-8")[:2000]
+            except OSError:
+                continue
+            m = ID_RE.search(head)
+            if m:
+                found[m.group(1)] = p
+    return found
+
+
+def segments_body(con: sqlite3.Connection, rid: str) -> str | None:
+    """Speaker-labelled paragraphs when diarization exists; None to fall back to the flat transcript."""
+    rows = con.execute(
+        "SELECT startMs, speaker, text FROM segments WHERE transcriptionId = ? ORDER BY seq", (rid,)
+    ).fetchall()
+    if not rows or not any(r["speaker"] for r in rows):
+        return None
+    out, current, buf, start = [], None, [], 0
+    for r in rows:
+        if r["speaker"] != current and buf:
+            out.append(f"**{current or 'Speaker'}** · {hms(start)}\n{' '.join(buf)}")
+            buf = []
+        if not buf:
+            current, start = r["speaker"], r["startMs"] or 0
+        buf.append(r["text"].strip())
+    if buf:
+        out.append(f"**{current or 'Speaker'}** · {hms(start)}\n{' '.join(buf)}")
+    return "\n\n".join(out)
+
+
+def render(row: sqlite3.Row, body: str, created: str | None = None) -> str:
+    when = local_dt(row["createdAt"])
+    ref = row["sourceURL"] or row["fileName"] or ""
+    fm = [
+        "---",
+        "type: transcript",
+        f"source: {source_kind(row)}",
+        f"date: {when:%Y-%m-%d}",
+        f"time: \"{when:%H:%M}\"",
+        f"duration: \"{hms(row['durationMs'])}\"",
+        "status: unprocessed",
+        f"title: {yaml_str(row['title'] or 'Untitled')}",
+        f"source_ref: {yaml_str(ref)}",
+        f"speakers: {row['speakerCount'] or 0}",
+        f"created: {created or f'{dt.date.today():%Y-%m-%d}'}",
+        "tags: [transcript]",
+        f"macparakeet_id: {row['id']}",
+        "---",
+        "",
+        f"# {row['title'] or 'Untitled'}",
+        "",
+        body.strip(),
+        "",
+    ]
+    return "\n".join(fm)
+
+
+def target_path(vault: Path, row: sqlite3.Row, reserved: set[Path]) -> Path:
+    base = vault / "inbox/transcripts"
+    stem = f"{local_dt(row['createdAt']):%Y-%m-%d}_{slugify(row['title'] or '')}"
+    p, n = base / f"{stem}.md", 2
+    while p.exists() or p in reserved:  # same day, same title: -2, -3 … (an existing note for *this* id never gets here)
+        p, n = base / f"{stem}-{n}.md", n + 1
+    return p
+
+
+def write_atomic(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".tmp-")
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    os.replace(tmp, path)
+
+
+# --- main -----------------------------------------------------------------------------
+
+def main() -> int:
+    ap = argparse.ArgumentParser(add_help=False)
+    ap.add_argument("-h", "--help", action="store_true")
+    ap.add_argument("--vault", type=Path, default=Path.home() / "vault")
+    ap.add_argument("--db", type=Path, default=DEFAULT_DB)
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--reset", action="store_true")
+    ap.add_argument("--json", action="store_true")
+    try:
+        a = ap.parse_args()
+    except SystemExit:
+        return 2
+    if a.help:
+        print(__doc__)
+        return 0
+
+    vault = a.vault.expanduser()
+    if not a.db.is_file():
+        print(f"transcripts-sync: no MacParakeet database at {a.db}", file=sys.stderr)
+        return 5
+    if not vault.is_dir():
+        print(f"transcripts-sync: no vault at {vault}", file=sys.stderr)
+        return 5
+
+    # Read-only, and patient: MacParakeet uses a rollback journal, so a write in progress briefly locks readers.
+    con = sqlite3.connect(f"file:{a.db}?mode=ro", uri=True, timeout=15)
+    con.row_factory = sqlite3.Row
+
+    cursor = load_cursor(a.reset)
+    try:
+        rows = con.execute(QUERY, {"u": cursor["updatedAt"], "id": cursor["id"]}).fetchall()
+    except sqlite3.OperationalError as e:
+        # Busy past the timeout, or MacParakeet changed its schema: say which, don't traceback.
+        print(f"transcripts-sync: cannot read {a.db}: {e}", file=sys.stderr)
+        return 5 if "no such" in str(e) else 1
+    known = existing_notes(vault)
+
+    written, refreshed, skipped, failed = [], [], [], []
+    reserved: set[Path] = set()
+    created_re = re.compile(r"^created:\s*(\S+)\s*$", re.M)
+    for row in rows:
+        rid = row["id"]
+        # Speaker-labelled segments read best, unless you edited the transcript in MacParakeet:
+        # the edit lives in cleanTranscript, and it wins.
+        body = (None if row["isTranscriptEdited"] else segments_body(con, rid)) or row["body"]
+        prior = known.get(rid)
+        prior_created = None
+        if prior is not None:
+            m = created_re.search(prior.read_text(encoding="utf-8")[:2000])
+            prior_created = m.group(1) if m else None
+        note = render(row, body, prior_created)
+        try:
+            if prior is None:
+                path = target_path(vault, row, reserved)
+                reserved.add(path)
+                if not a.dry_run:
+                    write_atomic(path, note)
+                written.append(str(path))
+            else:
+                status = STATUS_RE.search(prior.read_text(encoding="utf-8")[:2000])
+                if status and status.group(1) == "unprocessed" and prior.parent.name == "transcripts" \
+                        and prior.parent.parent.name == "inbox":
+                    if prior.read_text(encoding="utf-8") != note:
+                        if not a.dry_run:
+                            write_atomic(prior, note)
+                        refreshed.append(str(prior))
+                    else:
+                        skipped.append(str(prior))
+                else:
+                    skipped.append(str(prior))  # already processed by the vault brain: never overwrite
+        except OSError as e:
+            failed.append(f"{rid}: {e}")
+            break  # stop here so the cursor never moves past a row that wasn't written
+        if not a.dry_run:
+            save_cursor(row["updatedAt"], rid)
+
+    con.close()
+    summary = {"read": len(rows), "written": written, "refreshed": refreshed, "skipped": skipped, "failed": failed}
+    if a.json:
+        print(json.dumps(summary, indent=2))
+    elif rows or a.dry_run:
+        verb = "would write" if a.dry_run else "wrote"
+        print(f"transcripts-sync: {verb} {len(written)}, refreshed {len(refreshed)}, skipped {len(skipped)}"
+              + (f", FAILED {len(failed)}" if failed else ""))
+        for p in written + refreshed:
+            print(f"  {p}")
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

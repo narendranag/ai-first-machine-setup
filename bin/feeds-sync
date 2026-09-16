@@ -1,0 +1,205 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["feedparser>=6.0"]
+# ///
+"""feeds-sync — build today's reading digest in the vault from RSS feeds and newsletter emails.
+
+Reads <vault>/sources/feeds/feeds.txt, one source per line:
+  https://example.com/feed.xml                      RSS/Atom; summary from the feed
+  https://example.com/feed.xml  full                teaser-only feed: full text via `firecrawl`, falling back
+                                                    to `browse --md` (headless Chromium) for dynamic pages
+  gmail: from:newsletter@example.com                newsletter: Gmail search via `gmail` (newer_than is added)
+  # comments and blank lines are ignored
+
+Writes <vault>/sources/feeds/YYYY-MM-DD.md: one entry per new item — title, source, a short
+summary, link. Appends if the file exists. Seen items are remembered in
+<vault>/sources/feeds/.seen.json (in the vault, so every machine agrees), pruned after 60 days.
+
+Usage:
+  feeds-sync [--vault DIR] [--since-days N] [--summarize] [--dry-run]
+
+  --since-days N   ignore items older than N days (default 2)
+  --summarize      2-line summaries with `claude -p` instead of the feed's own text (slower, uses your plan)
+  --dry-run        print the digest; write nothing
+
+Exit codes: 0 ok (even if some sources failed; they are listed) · 2 usage · 5 no feeds.txt
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import hashlib
+import html
+import json
+import re
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+BIN = Path(__file__).resolve().parent
+SEEN_DAYS = 60
+MIN_FULL_TEXT = 1200  # shorter than this from firecrawl = a teaser or an unrendered page
+
+
+def clean(text: str, limit: int = 280) -> str:
+    text = re.sub(r"<[^>]+>", " ", html.unescape(text or ""))
+    text = re.sub(r"\s+", " ", text).strip()
+    return text if len(text) <= limit else text[: limit - 1].rsplit(" ", 1)[0] + "…"
+
+
+def run(cmd: list[str], stdin: str | None = None, timeout: int = 120) -> tuple[int, str]:
+    try:
+        r = subprocess.run(cmd, input=stdin, capture_output=True, text=True, timeout=timeout)
+        return r.returncode, r.stdout
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return 1, str(e)
+
+
+def summarize(title: str, text: str) -> str | None:
+    if not shutil.which("claude"):
+        return None
+    prompt = (
+        "Summarise this article in at most two plain sentences for a reading digest. "
+        "No preamble, no markdown.\n\n"
+        f"Title: {title}\n\n{text[:12000]}"
+    )
+    rc, out = run(["claude", "-p", prompt], timeout=180)
+    return clean(out, 400) if rc == 0 and out.strip() else None
+
+
+def rss_items(url: str, full: bool, cutoff: dt.datetime) -> list[dict]:
+    import feedparser
+
+    feed = feedparser.parse(url)
+    if feed.bozo and not feed.entries:
+        raise RuntimeError(f"unreadable feed: {feed.bozo_exception}")
+    source = feed.feed.get("title", url)
+    items = []
+    for e in feed.entries:
+        t = e.get("published_parsed") or e.get("updated_parsed")
+        when = dt.datetime.fromtimestamp(time.mktime(t), dt.timezone.utc) if t else None
+        if when and when < cutoff:
+            continue
+        link = e.get("link", "")
+        body = ""
+        if e.get("content"):
+            body = e.content[0].get("value", "")
+        body = body or e.get("summary", "")
+        items.append({"id": e.get("id") or link, "title": clean(e.get("title", "(untitled)"), 200),
+                      "source": source, "link": link, "text": body, "full": full})
+    return items
+
+
+def gmail_items(query: str, days: int) -> list[dict]:
+    rc, out = run([str(BIN / "gmail"), "search", f"{query} newer_than:{days}d", "-n", "25", "--json"])
+    if rc != 0:
+        raise RuntimeError("gmail search failed (Google auth set up? Bitwarden unlocked?)")
+    items = []
+    for m in json.loads(out or "[]"):
+        items.append({"id": f"gmail:{m['id']}", "title": clean(m["subject"], 200),
+                      "source": re.sub(r"\s*<.*?>", "", m["from"]).strip('" '),
+                      "link": f"https://mail.google.com/mail/u/0/#all/{m['id']}",
+                      "text": m.get("snippet", ""), "gmail_id": m["id"], "full": False})
+    return items
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(add_help=False)
+    ap.add_argument("-h", "--help", action="store_true")
+    ap.add_argument("--vault", type=Path, default=Path.home() / "vault")
+    ap.add_argument("--since-days", type=int, default=2)
+    ap.add_argument("--summarize", action="store_true")
+    ap.add_argument("--dry-run", action="store_true")
+    try:
+        a = ap.parse_args()
+    except SystemExit:
+        return 2
+    if a.help:
+        print(__doc__)
+        return 0
+
+    base = a.vault.expanduser() / "sources" / "feeds"
+    conf = base / "feeds.txt"
+    if not conf.is_file():
+        print(f"feeds-sync: no {conf} — copy templates/vault/sources/feeds/feeds.txt", file=sys.stderr)
+        return 5
+
+    seen_file = base / ".seen.json"
+    seen: dict[str, str] = json.loads(seen_file.read_text()) if seen_file.is_file() else {}
+    today = dt.date.today()
+    cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=a.since_days)
+
+    entries: list[dict] = []
+    failures: list[str] = []
+    for raw in conf.read_text().splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        try:
+            if line.startswith("gmail:"):
+                found = gmail_items(line[6:].strip(), a.since_days)
+            else:
+                parts = line.split()
+                found = rss_items(parts[0], "full" in parts[1:], cutoff)
+        except Exception as e:  # one broken source must not stop the digest
+            failures.append(f"{line} — {e}")
+            continue
+        for it in found:
+            key = hashlib.sha1(it["id"].encode()).hexdigest()
+            if key in seen:
+                continue
+            seen[key] = today.isoformat()
+            entries.append(it)
+
+    for it in entries:
+        text = it["text"]
+        if it["full"] and it["link"]:
+            rc, md = run([str(BIN / "firecrawl"), it["link"]])
+            if rc != 0 or len(md.strip()) < MIN_FULL_TEXT:
+                # Dynamic page or teaser: render it in a real browser.
+                rc2, md2 = run([str(BIN / "browse"), it["link"], "--md"], timeout=120)
+                if rc2 == 0 and len(md2.strip()) > len(md.strip()):
+                    rc, md = rc2, md2
+            if rc == 0 and md.strip():
+                text = md
+        elif it.get("gmail_id") and a.summarize:
+            rc, md = run([str(BIN / "gmail"), "get", it["gmail_id"]])
+            if rc == 0:
+                text = md
+        it["summary"] = (summarize(it["title"], text) if a.summarize else None) or clean(text)
+
+    lines: list[str] = []
+    out = base / f"{today.isoformat()}.md"
+    if not out.exists() or a.dry_run:
+        lines += ["---", "type: source", f"created: {today.isoformat()}", "source: feeds-sync",
+                  "tags: [digest]", "---", "", f"# Reading digest — {today.isoformat()}", ""]
+    by_source: dict[str, list[dict]] = {}
+    for it in entries:
+        by_source.setdefault(it["source"], []).append(it)
+    for source in sorted(by_source):
+        lines += [f"## {source}", ""]
+        for it in by_source[source]:
+            lines += [f"- **[{it['title']}]({it['link']})**", f"  {it['summary']}" if it["summary"] else ""]
+        lines.append("")
+    if failures:
+        lines += ["## Sources that failed", ""] + [f"- {f}" for f in failures] + [""]
+
+    if a.dry_run:
+        print("\n".join(lines))
+        return 0
+    if entries or failures:
+        base.mkdir(parents=True, exist_ok=True)
+        with out.open("a", encoding="utf-8") as fh:
+            fh.write("\n".join(lines))
+    horizon = (today - dt.timedelta(days=SEEN_DAYS)).isoformat()
+    seen_file.write_text(json.dumps({k: v for k, v in seen.items() if v >= horizon}, indent=0))
+    print(f"feeds-sync: {len(entries)} new items, {len(failures)} failed sources → {out}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

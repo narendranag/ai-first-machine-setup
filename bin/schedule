@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+# schedule — install, remove and list the fleet's scheduled jobs as launchd user agents.
+#
+# Usage:
+#   schedule list                   jobs defined here, and whether each is loaded on this machine
+#   schedule install <job>|--all    write ~/Library/LaunchAgents/local.system-manager.<job>.plist and load it
+#   schedule remove <job>           unload and delete it
+#
+# Jobs (edit the table below to add one; then record it in docs/machines/<host>.md):
+#   tasks-sync       hourly           vault task copies
+#   resources-sync   hourly           encrypted two-way sync of ~/resources
+#   feeds-sync       daily 06:00      reading digest
+#   daily-note       daily 06:30      draft today's note with `claude -p` (no edits outside ~/vault)
+#   map-check        daily 09:00      drift report → tg-send only when there is drift
+#   transcripts-sync on db change     MacParakeet transcriptions → vault/inbox/transcripts (WatchPaths)
+#
+# Logs: ~/Library/Logs/system-manager/<job>.log
+# Exit codes: 0 ok · 1 launchctl failed · 2 usage / unknown job · 3 not macOS
+set -euo pipefail
+. "$(dirname "$0")/../lib/common.sh"
+sm_wants_help "$@"
+sm_is_macos || sm_die "$EX_DEPS" "launchd is macOS-only; on Linux use a systemd user timer"
+
+AGENTS="$HOME/Library/LaunchAgents"
+LOGS="$HOME/Library/Logs/system-manager"
+PREFIX="local.system-manager"
+JOBS="tasks-sync resources-sync feeds-sync daily-note map-check transcripts-sync"
+
+# job → "<schedule>|<command>"; schedule is "interval:<seconds>", "daily:<HH>:<MM>" or "watch:<path>"
+job_def() {
+  local b="$SM_ROOT/bin"
+  case "$1" in
+    tasks-sync)     echo "interval:3600|$b/tasks-sync" ;;
+    resources-sync) echo "interval:3600|$b/resources-sync" ;;
+    feeds-sync)     echo "daily:06:00|$b/feeds-sync" ;;
+    daily-note)     echo "daily:06:30|cd \$HOME/vault && claude -p 'Draft today'\"'\"'s daily note per /today steps 1-2 only. Edit only files in ~/vault. Commit the vault.' --permission-mode auto" ;;
+    map-check)      echo "daily:09:00|$b/map-check >/tmp/sm-map-check.txt 2>&1 || $b/tg-send < /tmp/sm-map-check.txt" ;;
+    transcripts-sync) echo "watch:$HOME/Library/Application Support/MacParakeet/macparakeet.db|$b/transcripts-sync" ;;
+    *) return 1 ;;
+  esac
+}
+
+loaded() { launchctl print "gui/$(id -u)/$PREFIX.$1" >/dev/null 2>&1; }
+
+install_job() {
+  local job="$1" def sched cmd plist timing
+  def="$(job_def "$job")" || sm_die "$EX_USAGE" "unknown job: $job (see: schedule list)"
+  sched="${def%%|*}"; cmd="${def#*|}"
+  plist="$AGENTS/$PREFIX.$job.plist"
+  case "$sched" in
+    interval:*) timing="<key>StartInterval</key><integer>${sched#interval:}</integer>" ;;
+    daily:*) local hm="${sched#daily:}"
+             timing="<key>StartCalendarInterval</key><dict><key>Hour</key><integer>$((10#${hm%%:*}))</integer><key>Minute</key><integer>$((10#${hm##*:}))</integer></dict>" ;;
+    watch:*) # run when the file changes; ThrottleInterval coalesces a burst of writes into one run
+             timing="<key>WatchPaths</key><array><string>${sched#watch:}</string></array><key>ThrottleInterval</key><integer>30</integer>" ;;
+  esac
+  mkdir -p "$AGENTS" "$LOGS"
+  cmd="${cmd//&/&amp;}"; cmd="${cmd//</&lt;}"; cmd="${cmd//>/&gt;}"
+  cat > "$plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$PREFIX.$job</string>
+  <key>ProgramArguments</key>
+  <array><string>/bin/zsh</string><string>-lc</string><string>$cmd</string></array>
+  $timing
+  <key>StandardOutPath</key><string>$LOGS/$job.log</string>
+  <key>StandardErrorPath</key><string>$LOGS/$job.log</string>
+  <key>ProcessType</key><string>Background</string>
+  <key>EnvironmentVariables</key>
+  <dict><key>PATH</key><string>$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string></dict>
+</dict>
+</plist>
+PLIST
+  plutil -lint -s "$plist" || sm_die "$EX_FAIL" "invalid plist: $plist"
+  launchctl bootout "gui/$(id -u)/$PREFIX.$job" 2>/dev/null || true
+  launchctl bootstrap "gui/$(id -u)" "$plist" || sm_die "$EX_FAIL" "launchctl bootstrap failed for $job"
+  sm_info "[$(sm_host)] installed $PREFIX.$job ($sched) — record it in docs/machines/$(sm_host).md"
+}
+
+case "${1:-}" in
+  list)
+    for j in $JOBS; do
+      d="$(job_def "$j")"
+      s="${d%%|*}"; case "$s" in watch:*) s="on file change" ;; esac
+      printf '%-17s %-15s %s\n' "$j" "$s" "$(loaded "$j" && echo loaded || echo -)"
+    done ;;
+  install)
+    [ -n "${2:-}" ] || { sm_usage >&2; exit "$EX_USAGE"; }
+    if [ "$2" = "--all" ]; then for j in $JOBS; do install_job "$j"; done; else install_job "$2"; fi ;;
+  remove)
+    [ -n "${2:-}" ] || { sm_usage >&2; exit "$EX_USAGE"; }
+    launchctl bootout "gui/$(id -u)/$PREFIX.$2" 2>/dev/null || true
+    rm -f "$AGENTS/$PREFIX.$2.plist"
+    sm_info "removed $PREFIX.$2" ;;
+  *) sm_usage >&2; exit "$EX_USAGE" ;;
+esac

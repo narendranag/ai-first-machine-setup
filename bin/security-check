@@ -1,0 +1,159 @@
+#!/usr/bin/env bash
+# security-check — check this machine against the fleet security baseline.
+#
+# Usage:
+#   security-check [--ssh off|on]     expected sshd state (default: read `ssh:` from the map,
+#                                     else off). "on" means listening, key-only.
+#   ssh box 'bash -s -- --ssh on' < bin/security-check     run on a headless box
+#
+# Checks: FileVault / disk encryption · firewall · sshd state matches the machine's role ·
+#         password SSH disabled wherever sshd runs · browse profiles private · Tailscale up.
+#
+# Self-contained on purpose (no lib/ sourcing) so it can be piped to a box over SSH.
+# Output: one line per check, "PASS|FAIL|SKIP <check> — <detail>", prefixed with [<host>].
+# Exit codes: 0 all pass · 1 at least one FAIL · 2 usage
+set -uo pipefail
+
+usage() { awk 'NR==1 && /^#!/ {next} /^#/ {sub(/^# ?/, ""); print; next} {exit}' "$0"; }
+
+expect_ssh=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    --ssh) expect_ssh="${2:-}"; shift 2 ;;
+    *) usage >&2; exit 2 ;;
+  esac
+done
+
+os="$(uname -s)"
+if [ "$os" = "Darwin" ]; then host="$(scutil --get LocalHostName 2>/dev/null || hostname -s)"; else host="$(hostname -s)"; fi
+
+# Default the expectation from the map when run inside the repo.
+if [ -z "$expect_ssh" ]; then
+  map="$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)/docs/machines/$host.md"
+  if [ -f "$map" ]; then
+    v="$(awk '/^---$/{n++; next} n==1 && /^ssh:/ {sub(/^ssh:[ ]*/, ""); sub(/[ ]*#.*/, ""); print; exit}' "$map")"
+    case "$v" in off|"") expect_ssh="off" ;; *) expect_ssh="on" ;; esac
+  else
+    expect_ssh="off"
+  fi
+fi
+case "$expect_ssh" in off|on) ;; *) usage >&2; exit 2 ;; esac
+
+fails=0
+report() { # status check detail
+  printf '[%s] %-4s %s — %s\n' "$host" "$1" "$2" "$3"
+  [ "$1" = "FAIL" ] && fails=$((fails + 1))
+  return 0
+}
+
+# --- Disk encryption -------------------------------------------------------
+if [ "$os" = "Darwin" ]; then
+  if fdesetup status 2>/dev/null | grep -q "FileVault is On"; then
+    report PASS filevault "on"
+  else
+    report FAIL filevault "$(fdesetup status 2>/dev/null | head -1)"
+  fi
+elif command -v lsblk >/dev/null 2>&1; then
+  if lsblk -o TYPE 2>/dev/null | grep -q crypt; then
+    report PASS disk-encryption "LUKS volume present"
+  else
+    report FAIL disk-encryption "no encrypted volume found"
+  fi
+else
+  report SKIP disk-encryption "no lsblk"
+fi
+
+# --- Firewall --------------------------------------------------------------
+if [ "$os" = "Darwin" ]; then
+  fw="/usr/libexec/ApplicationFirewall/socketfilterfw"
+  if "$fw" --getglobalstate 2>/dev/null | grep -qi "enabled"; then
+    report PASS firewall "enabled"
+  else
+    report FAIL firewall "disabled"
+  fi
+elif command -v ufw >/dev/null 2>&1; then
+  if ufw status 2>/dev/null | grep -q "Status: active"; then
+    report PASS firewall "ufw active"
+  else
+    report FAIL firewall "ufw inactive (or needs sudo)"
+  fi
+elif command -v nft >/dev/null 2>&1 && nft list ruleset 2>/dev/null | grep -q "chain input"; then
+  report PASS firewall "nftables input chain present"
+else
+  report SKIP firewall "no ufw/nftables visible (try with sudo)"
+fi
+
+# --- sshd state vs role ----------------------------------------------------
+listening=0
+if (exec 3<>/dev/tcp/127.0.0.1/22) 2>/dev/null; then listening=1; fi
+
+if [ "$expect_ssh" = "off" ]; then
+  if [ "$listening" -eq 0 ]; then
+    report PASS sshd "off, as the role expects"
+  else
+    report FAIL sshd "listening on :22 but the map says ssh: off"
+  fi
+else
+  if [ "$listening" -eq 1 ]; then
+    report PASS sshd "on, as the role expects"
+  elif command -v tailscale >/dev/null 2>&1 && tailscale debug prefs 2>/dev/null | grep -q '"RunSSH": true'; then
+    report PASS sshd "Tailscale SSH serves this box"
+  else
+    report FAIL sshd "not listening but the map expects SSH"
+  fi
+fi
+
+# --- Password SSH disabled -------------------------------------------------
+if [ "$listening" -eq 1 ]; then
+  cfgs=""
+  for f in /etc/ssh/sshd_config.d/*.conf /etc/ssh/sshd_config; do [ -r "$f" ] && cfgs="$cfgs $f"; done
+  if [ -z "$cfgs" ]; then
+    report SKIP password-ssh "sshd_config not readable"
+  else
+    # sshd uses the FIRST value it reads; drop-ins are read before the main file.
+    # shellcheck disable=SC2086
+    first() { awk -v k="$1" 'tolower($1)==tolower(k) {print tolower($2); exit}' $cfgs; }
+    pw="$(first PasswordAuthentication)"; kbd="$(first KbdInteractiveAuthentication)"
+    if [ "$pw" = "no" ] && [ "$kbd" != "yes" ]; then
+      report PASS password-ssh "disabled"
+    else
+      report FAIL password-ssh "PasswordAuthentication=${pw:-default(yes)} KbdInteractiveAuthentication=${kbd:-default}"
+    fi
+  fi
+else
+  report SKIP password-ssh "sshd not running"
+fi
+
+# --- browse profiles (logged-in state) --------------------------------------
+prof="$HOME/.config/browse/profiles"
+if [ ! -d "$prof" ]; then
+  report SKIP browse-profiles "none"
+else
+  if [ "$os" = "Darwin" ]; then mode="$(stat -f '%Lp' "$prof")"; else mode="$(stat -c '%a' "$prof")"; fi
+  if [ "$mode" != "700" ]; then
+    report FAIL browse-profiles "$prof is mode $mode, expected 700"
+  elif git -C "$prof" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    report FAIL browse-profiles "$prof is inside a git work tree"
+  else
+    report PASS browse-profiles "private, outside any repo"
+  fi
+fi
+
+# --- Tailscale -------------------------------------------------------------
+ts=""
+for c in tailscale /Applications/Tailscale.app/Contents/MacOS/Tailscale; do
+  command -v "$c" >/dev/null 2>&1 && { ts="$c"; break; }
+done
+if [ -z "$ts" ]; then
+  report FAIL tailscale "not installed"
+else
+  state="$("$ts" status --json 2>/dev/null | awk -F'"' '/"BackendState"/ {print $4; exit}')"
+  if [ "$state" = "Running" ]; then
+    report PASS tailscale "up"
+  else
+    report FAIL tailscale "state: ${state:-unknown}"
+  fi
+fi
+
+[ "$fails" -eq 0 ]

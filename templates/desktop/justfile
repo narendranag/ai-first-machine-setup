@@ -1,0 +1,18 @@
+# justfile — setup / test / lint / run are the contract every repo keeps.
+
+setup:
+    pnpm install
+
+dev:
+    pnpm tauri dev
+
+test:
+    pnpm vitest run
+
+lint:
+    pnpm biome check .
+
+run: dev
+
+build:
+    pnpm tauri build

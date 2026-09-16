@@ -1,0 +1,9 @@
+
+# --- system-manager template ---
+.DS_Store
+.envrc.local
+.env
+.env.*
+!.env.example
+.venv/
+__pycache__/

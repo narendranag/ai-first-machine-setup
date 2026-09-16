@@ -1,0 +1,28 @@
+# VS Code extensions — installed with:
+#   grep -v '^#' vscode-extensions.txt | xargs -n1 code --install-extension
+# Extras on one machine go in docs/machines/<host>.md.
+
+# Essential
+anthropic.claude-code
+ms-vscode-remote.remote-ssh
+eamodio.gitlens
+
+# Languages
+ms-python.python
+ms-python.vscode-pylance
+charliermarsh.ruff
+biomejs.biome
+redhat.vscode-yaml
+tamasfe.even-better-toml
+timonwong.shellcheck
+
+# Markdown and notes
+yzhang.markdown-all-in-one
+davidanson.vscode-markdownlint
+mechatroner.rainbow-csv
+
+# Hygiene
+usernamehw.errorlens
+editorconfig.editorconfig
+streetsidesoftware.code-spell-checker
+gruntfuggly.todo-tree

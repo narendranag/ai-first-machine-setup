@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# Stop hook (end of every turn):
+#   1. commit and push any docs/ changes in the fleet brain as "[<host>] <what>"
+#   2. tg-send if the turn ran longer than SM_LONG_TURN_MIN minutes (default 10)
+# Never blocks Claude; failures are reported on stderr and ignored.
+SM="${SM_HOME:-$HOME/system-manager}"
+# timeout is GNU coreutils; fall back to gtimeout, or run unguarded.
+to() { local s="$1"; shift; if command -v timeout >/dev/null; then timeout "$s" "$@"; elif command -v gtimeout >/dev/null; then gtimeout "$s" "$@"; else "$@"; fi; }
+input="$(cat)"
+sid="$(printf '%s' "$input" | jq -r '.session_id // "default"' 2>/dev/null)"
+cwd="$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null)"
+host="$(scutil --get LocalHostName 2>/dev/null || hostname -s)"
+
+if [ -d "$SM/.git" ] && [ ! -f "$SM/.template" ] && [ -n "$(git -C "$SM" status --porcelain -- docs 2>/dev/null)" ]; then
+  files="$(git -C "$SM" status --porcelain -- docs | awk '{print $NF}' | sed 's|^docs/||' | head -5 | paste -sd ', ' -)"
+  git -C "$SM" add -- docs
+  if out="$(git -C "$SM" commit -q -m "[$host] update $files" -- docs 2>&1)"; then
+    # Machine files are private: never push them to a public repository.
+    vis="$(cd "$SM" && to 15 gh repo view --json visibility --jq .visibility 2>/dev/null)"
+    if [ "$vis" = "PUBLIC" ]; then
+      echo "system-manager: committed docs locally but NOT pushed — origin is a public repo" >&2
+    else
+      to 30 git -C "$SM" push -q 2>/dev/null || echo "system-manager: committed docs but push failed (offline?)" >&2
+    fi
+  else
+    echo "system-manager: could not commit docs/ — ${out:0:200}" >&2
+  fi
+fi
+
+start_file="${TMPDIR:-/tmp}/claude-turn-$sid"
+if [ -f "$start_file" ]; then
+  elapsed=$(( $(date +%s) - $(cat "$start_file") ))
+  rm -f "$start_file"
+  if [ "$elapsed" -ge $(( ${SM_LONG_TURN_MIN:-10} * 60 )) ]; then
+    "$SM/bin/tg-send" "done after $((elapsed / 60)) min in ${cwd/#$HOME/~}" >/dev/null 2>&1 || true
+  fi
+fi
+exit 0
